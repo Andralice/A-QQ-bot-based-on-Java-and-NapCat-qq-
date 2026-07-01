@@ -171,6 +171,49 @@ public class LongTermMemoryRepository implements Repository {
         }
     }
 
+    /** 标记记忆被 Prompt 使用 */
+    public void markUsed(long id) throws SQLException {
+        String sql = "UPDATE long_term_memories SET last_used_at = NOW() WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 查找相似记忆，用于去重（插入前检查） */
+    public List<LongTermMemory> findSimilar(String userId, String groupId, String content, String keywords) throws SQLException {
+        StringBuilder sql = new StringBuilder(
+                "SELECT * FROM long_term_memories WHERE user_id = ? AND (content LIKE ? OR keywords LIKE ?) ");
+        boolean hasGroup = groupId != null && !groupId.isBlank();
+        sql.append(hasGroup ? "AND group_id = ? " : "AND group_id IS NULL ");
+        sql.append("ORDER BY created_at DESC LIMIT 5");
+
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            ps.setString(1, userId);
+            ps.setString(2, "%" + content + "%");
+            ps.setString(3, "%" + (keywords != null ? keywords : content) + "%");
+            if (hasGroup) ps.setString(4, groupId);
+
+            ResultSet rs = ps.executeQuery();
+            List<LongTermMemory> results = new ArrayList<>();
+            while (rs.next()) results.add(mapRow(rs));
+            return results;
+        }
+    }
+
+    /** 确认已有记忆：更新确认时间和重要性 */
+    public void upsertConfirm(long id) throws SQLException {
+        String sql = "UPDATE long_term_memories SET last_confirmed_at = NOW(), last_seen_at = NOW(), "
+                + "importance = LEAST(importance + 1, 5), status = 'CONFIRMED', updated_at = NOW() WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.executeUpdate();
+        }
+    }
+
     /** 删除记忆 */
     public void delete(long id) throws SQLException {
         String sql = "DELETE FROM long_term_memories WHERE id = ?";
@@ -214,6 +257,17 @@ public class LongTermMemoryRepository implements Repository {
         if (ca != null) m.setCreatedAt(ca.toLocalDateTime());
         Timestamp ua = rs.getTimestamp("updated_at");
         if (ua != null) m.setUpdatedAt(ua.toLocalDateTime());
+        m.setSource(rs.getString("source") != null ? rs.getString("source") : "SELF_REPORTED");
+        Timestamp lca = rs.getTimestamp("last_confirmed_at");
+        if (lca != null) m.setLastConfirmedAt(lca.toLocalDateTime());
+        Timestamp lsa = rs.getTimestamp("last_seen_at");
+        if (lsa != null) m.setLastSeenAt(lsa.toLocalDateTime());
+        Timestamp lua = rs.getTimestamp("last_used_at");
+        if (lua != null) m.setLastUsedAt(lua.toLocalDateTime());
+        m.setConfidence(rs.getDouble("confidence"));
+        if (rs.wasNull()) m.setConfidence(1.0);
+        String st = rs.getString("status");
+        m.setStatus(st != null ? st : "ACTIVE");
         return m;
     }
 }

@@ -1,6 +1,8 @@
 package com.start.service;
 
 import com.start.config.BotConfig;
+import com.start.memory.MemoryRecall;
+import com.start.memory.MemoryStatus;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
@@ -141,11 +143,39 @@ public class PromptBuilder {
             sb.append(ctx.pendingFilesHint);
         }
 
-        // 长期记忆召回
+        // 长期记忆召回（旧格式，保留兼容）
         if (ctx.memoryRecallContext != null && !ctx.memoryRecallContext.isEmpty()) {
             sb.append(ctx.memoryRecallContext);
         }
 
+        // 长期记忆召回（新格式，MemoryRecall 列表 → 叙事语言）
+        if (ctx.memoryRecalls != null && !ctx.memoryRecalls.isEmpty()) {
+            sb.append(buildMemoryNarrative(ctx.memoryRecalls));
+        }
+
+        return sb.toString();
+    }
+
+    /** 将 MemoryRecall 列表翻译为自然语言叙事 */
+    private String buildMemoryNarrative(List<MemoryRecall> recalls) {
+        StringBuilder sb = new StringBuilder("\n\n【你可能记得】");
+        for (MemoryRecall r : recalls) {
+            sb.append("\n• ");
+            if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) {
+                sb.append(r.stabilityHint());
+            }
+            sb.append(r.content());
+            if (r.recentlyConfirmed() && r.status() == MemoryStatus.CONFIRMED) {
+                sb.append("。（最近又提到过）");
+            } else if (r.ageText() != null && !r.ageText().isEmpty()) {
+                sb.append("（").append(r.ageText()).append("）");
+            } else if (r.status() == MemoryStatus.UNCERTAIN || r.status() == MemoryStatus.OUTDATED) {
+                sb.append("，不知道现在还是不是");
+            }
+        }
+        sb.append("\n\n这些记忆来自过去的聊天，可能已经过期或不够准确。");
+        sb.append("\n如果记忆与当前消息冲突，以当前消息为准。");
+        sb.append("\n不要强行坚持旧记忆——可以主动确认：\"我记得你之前喜欢奶茶，现在还喜欢吗？\"");
         return sb.toString();
     }
 }

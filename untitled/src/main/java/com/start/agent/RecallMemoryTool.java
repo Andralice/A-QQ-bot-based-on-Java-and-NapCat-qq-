@@ -1,21 +1,30 @@
 package com.start.agent;
 
+import com.start.memory.MemoryInterpreter;
+import com.start.memory.MemoryRecall;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
  * AI 检索长期记忆。当用户提到某个话题、或者对话需要回忆之前的信息时调用。
  * 如果 LLM 未提供 keyword，则用预注入的关键词自动搜索。
+ * 使用 MemoryInterpreter 将 DB 记录翻译为叙事语言。
  */
 public class RecallMemoryTool implements Tool {
     private final LongTermMemoryRepository repo;
+    private final MemoryInterpreter interpreter;
     private List<String> autoKeywords;
 
     public RecallMemoryTool(LongTermMemoryRepository repo) {
         this.repo = repo;
+        this.interpreter = new MemoryInterpreter();
+    }
+
+    public RecallMemoryTool(LongTermMemoryRepository repo, MemoryInterpreter interpreter) {
+        this.repo = repo;
+        this.interpreter = interpreter;
     }
 
     /** 预注入关键词，LLM 未提供 keyword 时自动使用 */
@@ -56,7 +65,6 @@ public class RecallMemoryTool implements Tool {
 
         if (userId == null) return "缺少 user_id";
 
-        // 如果 LLM 没提供关键词，使用预注入的关键词
         List<String> keywords = autoKeywords;
         if ((keyword == null || keyword.isBlank()) && (keywords == null || keywords.isEmpty())) {
             keywords = Collections.emptyList();
@@ -65,13 +73,10 @@ public class RecallMemoryTool implements Tool {
         try {
             List<LongTermMemory> results;
             if (keyword != null && !keyword.isBlank()) {
-                // LLM 明确指定了关键词，直接用（支持日期范围）
                 results = repo.search(userId, groupId, keyword, count, dateFrom, dateTo);
             } else if (!keywords.isEmpty()) {
-                // 用预注入的关键词多词搜索
                 results = searchMultiKeyword(userId, groupId, keywords, count, dateFrom, dateTo);
             } else {
-                // 什么都没有，无关键词搜索
                 results = repo.search(userId, groupId, null, count, dateFrom, dateTo);
             }
 
@@ -85,19 +90,28 @@ public class RecallMemoryTool implements Tool {
 
             // 标记为已召回
             for (LongTermMemory m : results) {
-                try { repo.markRecalled(m.getId()); } catch (Exception ignored) {}
+                try {
+                    repo.markRecalled(m.getId());
+                    repo.markUsed(m.getId());
+                } catch (Exception ignored) {}
             }
 
-            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MM-dd");
+            // 使用 MemoryInterpreter 翻译为叙事格式
+            List<MemoryRecall> recalls = interpreter.interpretAll(results);
             StringBuilder sb = new StringBuilder("关于该用户的记忆：\n");
-            for (int i = 0; i < results.size(); i++) {
-                LongTermMemory m = results.get(i);
-                sb.append(i + 1).append(". [").append(m.getMemoryType()).append("] ");
-                sb.append(m.getContent());
-                if (m.getCreatedAt() != null) {
-                    sb.append(" （").append(m.getCreatedAt().format(fmt)).append("）");
+            for (int i = 0; i < recalls.size(); i++) {
+                MemoryRecall r = recalls.get(i);
+                sb.append(i + 1).append(". ");
+                if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) {
+                    sb.append(r.stabilityHint()).append(" ");
                 }
-                sb.append(" (重要性:").append(m.getImportance()).append(")\n");
+                sb.append(r.content());
+                if (r.ageText() != null && !r.ageText().isEmpty()) {
+                    sb.append("（").append(r.ageText()).append("）");
+                }
+                sb.append(" (置信度:").append(String.format("%.0f%%", r.confidence() * 100));
+                sb.append(", 状态:").append(r.status());
+                sb.append(", 来源:").append(r.source()).append(")\n");
             }
             return sb.toString();
         } catch (Exception e) {

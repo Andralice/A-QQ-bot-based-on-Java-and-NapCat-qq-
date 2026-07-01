@@ -9,6 +9,7 @@ import com.start.Main;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.agent.social.LuckTool;
 import com.start.agent.MemoryTool;
+import com.start.memory.MemoryRecall;
 import com.start.agent.social.PokeTool;
 import com.start.agent.social.ProfessionPKTool;
 import com.start.agent.social.ProfessionTool;
@@ -39,6 +40,7 @@ import com.start.agent.ShellTool;
 import com.start.agent.ScheduleRecurringTaskTool;
 import com.start.agent.StickerTool;
 import com.start.agent.LinkPreviewTool;
+import com.start.agent.WebFetchTool;
 import com.start.agent.QueryFileTool;
 import com.start.agent.SendFileTool;
 import com.start.agent.evo.SelfEvolveTool;
@@ -632,12 +634,12 @@ public class BaiLianService {
                 ctx.pendingFilesHint(fb.toString());
             }
 
-            // 主动记忆召回（通过 MemoryService 统一查询）
+            // 主动记忆召回（通过 MemoryService 统一查询，输出结构化 MemoryRecall 列表）
             List<String> hanlpKeywords = extractKeywords(userPrompt);
-            String memoryCtx = memoryService.queryForPrompt(userId, groupId, hanlpKeywords);
-            if (!memoryCtx.isEmpty()) {
-                ctx.memoryRecallContext(memoryCtx);
-                logger.info("主动记忆召回: 关键词={}", hanlpKeywords);
+            List<MemoryRecall> memoryRecalls = memoryService.queryForPrompt(userId, groupId, hanlpKeywords);
+            if (!memoryRecalls.isEmpty()) {
+                ctx.memoryRecalls(memoryRecalls);
+                logger.info("主动记忆召回: 关键词={}, 召回{}条", hanlpKeywords, memoryRecalls.size());
             }
 
             logger.debug("完整请求:{}", systemPrompt);
@@ -708,6 +710,7 @@ public class BaiLianService {
                     new ScheduleRecurringTaskTool(new RecurringTaskRepository(DatabaseConfig.getDataSource())),
                     new StickerTool(botInstance),
                     new LinkPreviewTool(),
+                    new WebFetchTool(),
                     new SelfEvolveTool(userId, evoRepo),
                     new RestartBotTool(userId),
                     new UpdateConfigTool(runtimeConfig, userId),

@@ -227,6 +227,12 @@ public class DatabaseConfig {
             "ALTER TABLE long_term_memories ADD COLUMN triggered BOOLEAN DEFAULT FALSE",
             "ALTER TABLE long_term_memories ADD COLUMN keywords TEXT",
             "ALTER TABLE long_term_memories ADD COLUMN recall_count INT DEFAULT 0",
+            "ALTER TABLE long_term_memories ADD COLUMN source VARCHAR(20) DEFAULT 'SELF_REPORTED'",
+            "ALTER TABLE long_term_memories ADD COLUMN last_confirmed_at TIMESTAMP NULL",
+            "ALTER TABLE long_term_memories ADD COLUMN last_seen_at TIMESTAMP NULL",
+            "ALTER TABLE long_term_memories ADD COLUMN last_used_at TIMESTAMP NULL",
+            "ALTER TABLE long_term_memories ADD COLUMN confidence DOUBLE DEFAULT 1.0",
+            "ALTER TABLE long_term_memories ADD COLUMN status VARCHAR(20) DEFAULT 'ACTIVE'",
 
             // 知识库黑名单
             "CREATE TABLE IF NOT EXISTS knowledge_blacklist (" +

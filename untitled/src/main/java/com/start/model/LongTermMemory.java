@@ -18,6 +18,12 @@ public class LongTermMemory {
     private int recallCount = 0;
     private LocalDateTime triggerAt;         // 定时触发时间，非空表示定时事件
     private boolean triggered = false;       // 是否已触发
+    private String source = "SELF_REPORTED"; // 记忆来源
+    private LocalDateTime lastConfirmedAt;   // 最近确认时间
+    private LocalDateTime lastSeenAt;        // 最近再次出现时间
+    private LocalDateTime lastUsedAt;        // 最近被 Prompt 使用时间
+    private double confidence = 1.0;         // 置信度 0.0-1.0
+    private String status = "ACTIVE";        // 状态：ACTIVE/UNCERTAIN/OUTDATED/CONTRADICTED/CONFIRMED
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -59,6 +65,24 @@ public class LongTermMemory {
 
     public boolean isTriggered() { return triggered; }
     public void setTriggered(boolean triggered) { this.triggered = triggered; }
+
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
+
+    public LocalDateTime getLastConfirmedAt() { return lastConfirmedAt; }
+    public void setLastConfirmedAt(LocalDateTime lastConfirmedAt) { this.lastConfirmedAt = lastConfirmedAt; }
+
+    public LocalDateTime getLastSeenAt() { return lastSeenAt; }
+    public void setLastSeenAt(LocalDateTime lastSeenAt) { this.lastSeenAt = lastSeenAt; }
+
+    public LocalDateTime getLastUsedAt() { return lastUsedAt; }
+    public void setLastUsedAt(LocalDateTime lastUsedAt) { this.lastUsedAt = lastUsedAt; }
+
+    public double getConfidence() { return confidence; }
+    public void setConfidence(double confidence) { this.confidence = confidence; }
+
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
 
     public LocalDateTime getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }

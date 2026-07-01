@@ -3,12 +3,18 @@ package com.start.agent;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 
+import java.time.LocalDateTime;
 import java.util.*;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * AI 存储长期记忆。当用户说了值得记住的信息（个人事实、偏好、事件），调用此工具写入 DB。
+ * 插入前检查相似记忆，找到则强化已有记忆而非重复插入。
  */
 public class RememberFactTool implements Tool {
+    private static final Logger logger = LoggerFactory.getLogger(RememberFactTool.class);
     private final LongTermMemoryRepository repo;
 
     public RememberFactTool(LongTermMemoryRepository repo) {
@@ -44,17 +50,38 @@ public class RememberFactTool implements Tool {
         String content = (String) args.get("content");
         if (userId == null || content == null || content.isBlank()) return "缺少 user_id 或 content";
 
+        String trimmedContent = content.trim();
+        String keywords = (String) args.get("keywords");
+
+        // 检查是否有相似记忆，有则强化而非重复插入
+        try {
+            List<LongTermMemory> similar = repo.findSimilar(userId, groupId, trimmedContent, keywords);
+            if (!similar.isEmpty()) {
+                LongTermMemory existing = similar.get(0);
+                repo.upsertConfirm(existing.getId());
+                return "已更新记忆: " + trimmedContent + "（之前已存在，已强化确认）";
+            }
+        } catch (Exception e) {
+            logger.warn("Upsert check failed, falling through to insert: {}", e.getMessage());
+        }
+
         LongTermMemory m = new LongTermMemory();
         m.setUserId(userId);
         m.setGroupId(groupId);
-        m.setContent(content.trim());
+        m.setContent(trimmedContent);
         m.setMemoryType((String) args.getOrDefault("memory_type", "fact"));
-        m.setKeywords((String) args.get("keywords"));
+        m.setKeywords(keywords);
         m.setImportance(parseIntSafe((String) args.get("importance"), 3));
+        m.setSource("SELF_REPORTED");
+        m.setStatus("ACTIVE");
+        m.setConfidence(0.9);
+        LocalDateTime now = LocalDateTime.now();
+        m.setLastSeenAt(now);
+        m.setLastConfirmedAt(now);
 
         try {
             repo.insert(m);
-            return "已记住: " + content;
+            return "已记住: " + trimmedContent;
         } catch (Exception e) {
             return "记录失败: " + e.getMessage();
         }
