@@ -42,7 +42,7 @@ public class MemoryService {
                 try {
                     List<MemoryRecall> results = p.search(MemoryQuery.of(userId, groupId, kw));
                     for (MemoryRecall r : results) {
-                        String dedupKey = r.content().toLowerCase();
+                        String dedupKey = r.content() != null ? r.content().toLowerCase() : "";
                         if (seen.add(dedupKey)) {
                             merged.add(r);
                             if (merged.size() >= 10) break;

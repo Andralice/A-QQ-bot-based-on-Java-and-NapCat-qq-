@@ -257,17 +257,13 @@ public class LongTermMemoryRepository implements Repository {
         if (ca != null) m.setCreatedAt(ca.toLocalDateTime());
         Timestamp ua = rs.getTimestamp("updated_at");
         if (ua != null) m.setUpdatedAt(ua.toLocalDateTime());
-        m.setSource(rs.getString("source") != null ? rs.getString("source") : "SELF_REPORTED");
-        Timestamp lca = rs.getTimestamp("last_confirmed_at");
-        if (lca != null) m.setLastConfirmedAt(lca.toLocalDateTime());
-        Timestamp lsa = rs.getTimestamp("last_seen_at");
-        if (lsa != null) m.setLastSeenAt(lsa.toLocalDateTime());
-        Timestamp lua = rs.getTimestamp("last_used_at");
-        if (lua != null) m.setLastUsedAt(lua.toLocalDateTime());
-        m.setConfidence(rs.getDouble("confidence"));
-        if (rs.wasNull()) m.setConfidence(1.0);
-        String st = rs.getString("status");
-        m.setStatus(st != null ? st : "ACTIVE");
+        // 新列可能不存在（未执行迁移时），全部 try-catch 防御，使用默认值
+        try { m.setSource(rs.getString("source") != null ? rs.getString("source") : "SELF_REPORTED"); } catch (SQLException ignored) {}
+        try { Timestamp lca = rs.getTimestamp("last_confirmed_at"); if (lca != null) m.setLastConfirmedAt(lca.toLocalDateTime()); } catch (SQLException ignored) {}
+        try { Timestamp lsa = rs.getTimestamp("last_seen_at"); if (lsa != null) m.setLastSeenAt(lsa.toLocalDateTime()); } catch (SQLException ignored) {}
+        try { Timestamp lua = rs.getTimestamp("last_used_at"); if (lua != null) m.setLastUsedAt(lua.toLocalDateTime()); } catch (SQLException ignored) {}
+        try { m.setConfidence(rs.getDouble("confidence")); if (rs.wasNull()) m.setConfidence(1.0); } catch (SQLException ignored) {}
+        try { String st = rs.getString("status"); m.setStatus(st != null ? st : "ACTIVE"); } catch (SQLException ignored) {}
         return m;
     }
 }

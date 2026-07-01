@@ -101,7 +101,7 @@ public class MemoryInterpreter {
         LocalDateTime now = LocalDateTime.now(clock);
 
         // 检查是否有更新的矛盾记忆
-        if (allUserMemories != null && allUserMemories.size() > 1) {
+        if (allUserMemories != null && allUserMemories.size() > 1 && m.getCreatedAt() != null) {
             Set<String> myKeywords = splitKeywords(m.getKeywords());
             for (LongTermMemory other : allUserMemories) {
                 if (other.getId() != null && other.getId().equals(m.getId())) continue;

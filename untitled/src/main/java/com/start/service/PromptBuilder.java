@@ -164,7 +164,7 @@ public class PromptBuilder {
             if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) {
                 sb.append(r.stabilityHint());
             }
-            sb.append(r.content());
+            sb.append(r.content() != null ? r.content() : "");
             if (r.recentlyConfirmed() && r.status() == MemoryStatus.CONFIRMED) {
                 sb.append("。（最近又提到过）");
             } else if (r.ageText() != null && !r.ageText().isEmpty()) {
