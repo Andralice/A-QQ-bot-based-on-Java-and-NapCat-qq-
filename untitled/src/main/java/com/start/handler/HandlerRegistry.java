@@ -7,6 +7,7 @@ import com.start.service.ConversationManager;
 import com.start.service.EggGroupDataCenter;
 import com.start.repository.MerchantRepository;
 import com.start.runtime.ConversationRuntime;
+import com.start.runtime.conversation.ConversationRuntimeConfig;
 import com.start.service.BaiLianService;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.MerchantApiService;
@@ -27,7 +28,7 @@ public class HandlerRegistry {
     private final EggGroupDataCenter dataCenter = new EggGroupDataCenter();
     private final TravelingMerchantHandler merchantHandler;
     private final MerchantApiService merchantApiService;
-    public HandlerRegistry(BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot, ServerAdminService shellService, ConversationManager conversationManager, ConversationRuntime runtime) {
+    public HandlerRegistry(BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot, ServerAdminService shellService, ConversationManager conversationManager, ConversationRuntime runtime, ConversationRuntimeConfig config) {
         // 远行商人：数据库 + API
         MerchantRepository merchantRepo = new MerchantRepository();
         merchantRepo.initTables();
@@ -54,7 +55,7 @@ public class HandlerRegistry {
         var stateStore = baiLianService.createSharedStateStore();
         ConversationInterpreter interpreter = new ConversationInterpreter(
                 stateStore, baiLianService.getAiDatabaseService());
-        handlers.add(new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, runtime));
+        handlers.add(new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, runtime, config));
     }
 
     public void dispatch(JsonNode message, Main bot) {

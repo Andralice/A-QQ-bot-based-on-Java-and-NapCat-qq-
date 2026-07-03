@@ -18,6 +18,8 @@ import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
 import com.start.model.DecisionTrace;
 import com.start.runtime.ConversationRuntime;
+import com.start.runtime.conversation.ConversationRuntimeConfig;
+import com.start.runtime.conversation.ConversationSession;
 import com.start.runtime.RuntimeEvent;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.util.MessageUtil;
@@ -55,21 +57,21 @@ public class AIHandler implements MessageHandler {
     private final ConversationManager conversationManager;
     private final ConversationInterpreter interpreter;
     private final ConversationRuntime runtime;
+    private final ConversationRuntimeConfig config;
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
-    private static final long USER_REACTION_COOLDOWN_MS = 2000;
     private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
-    private static final long GROUP_REPLY_COOLDOWN_MS = 12_000;
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
-                     ConversationInterpreter interpreter, ConversationRuntime runtime) {
+                     ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config) {
         this.aiService = aiService;
         this.moodService = aiService.getMoodService();
         this.groupExecutor = groupExecutor;
         this.conversationManager = conversationManager;
         this.interpreter = interpreter;
         this.runtime = runtime;
+        this.config = config;
     }
 
     @Override
@@ -217,15 +219,17 @@ public class AIHandler implements MessageHandler {
         }
 
         // 群级冷却
+        long groupCooldown = config.groupReplyCooldown().toMillis();
         Long lastGroupReply = lastGroupReplyTime.get(gid);
-        if (lastGroupReply != null && now - lastGroupReply < GROUP_REPLY_COOLDOWN_MS) {
+        if (lastGroupReply != null && now - lastGroupReply < groupCooldown) {
             rateLimited = true;
         }
 
-        // 同一用户2秒冷却
+        // 用户冷却
+        long userCooldown = config.userReplyCooldown().toMillis();
         String userKey = gid + "_" + userId;
         Long last = lastReactionTime.get(userKey);
-        if (last != null && now - last < USER_REACTION_COOLDOWN_MS) {
+        if (last != null && now - last < userCooldown) {
             rateLimited = true;
         }
 
@@ -263,7 +267,6 @@ public class AIHandler implements MessageHandler {
                 toolCalls, tokensUsed, latencyMs);
     }
 
-    private static final int MAX_REGENERATE = 2;
     private static final HttpClient auditHttpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(5000))
             .build();
@@ -297,7 +300,7 @@ public class AIHandler implements MessageHandler {
             String imageDesc = aiService.describeImages(imageDataUris);
             String linkContext = buildLinkContext(state.getLinksToFetch());
 
-            for (int attempt = 0; attempt <= MAX_REGENERATE; attempt++) {
+            for (int attempt = 0; attempt <= config.maxRegenerate(); attempt++) {
                 if (attempt > 0) {
                     startRevision = state.getMessageRevision();
                     startMsgCount = state.getPendingMessages().size();
@@ -316,10 +319,18 @@ public class AIHandler implements MessageHandler {
                 if (!imageDesc.isEmpty()) prompt = prompt + "\n\n" + imageDesc;
                 if (!linkContext.isEmpty()) prompt = prompt + "\n\n" + linkContext;
 
-                String sessionId = "group_" + groupId + "_" + userId;
+                ConversationSession session = ConversationSession.of(gid, userId, nickname)
+                        .userPrompt(prompt)
+                        .atUserIds(ats)
+                        .allowSilence(allowSilence)
+                        .generation(state.getGeneration())
+                        .revision(state.getMessageRevision())
+                        .startMs(startMs)
+                        .build();
+
                 aiService.setSuppressSessionWrite(true);
                 try {
-                    genResult = aiService.generate(sessionId, userId, prompt, gid, nickname, ats, allowSilence);
+                    genResult = aiService.generate(session);
                 } finally {
                     aiService.setSuppressSessionWrite(false);
                 }
@@ -338,7 +349,7 @@ public class AIHandler implements MessageHandler {
                 if (state.getMessageRevision() == startRevision) {
                     break;
                 }
-                if (attempt >= MAX_REGENERATE) {
+                if (attempt >= config.maxRegenerate()) {
                     logger.debug("Max regenerate reached, sending anyway gid={} uid={}", gid, userId);
                     break;
                 }

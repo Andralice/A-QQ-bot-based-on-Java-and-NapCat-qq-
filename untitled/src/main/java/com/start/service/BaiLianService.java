@@ -477,6 +477,12 @@ public class BaiLianService {
         return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, false).reply();
     }
 
+    /** 基于 ConversationSession 的生成入口。 */
+    public GenerationResult generate(com.start.runtime.conversation.ConversationSession session) {
+        return generate(session.sessionId(), session.userId(), session.userPrompt(),
+                session.groupId(), session.nickname(), session.atUserIds(), session.allowSilence());
+    }
+
     /** 带沉默权的生成方法。allowSilence=true 时模型可以输出 <NO_REPLY> 选择沉默。 */
     public GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId, String nickname, List<Long> atUserIds, boolean allowSilence) {
         logger.info("🧠 AI 调用: sessionId={}, prompt=[{}], ats={}, allowSilence={}", sessionId, userPrompt, atUserIds, allowSilence);
