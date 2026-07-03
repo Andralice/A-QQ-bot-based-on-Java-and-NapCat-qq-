@@ -24,9 +24,14 @@ public class RememberFactTool implements Tool {
     @Override public String getName() { return "remember_fact"; }
 
     @Override public String getDescription() {
-        return "记录一条关于用户的长期记忆。当用户说了一个可能以后有用的信息时调用。" +
-               "例如用户说我今天不开心、我是程序员、下周五是我生日等，这些信息以后可能有用。" +
-               "参数：user_id(用户QQ), group_id(群号), content(记忆内容，一句话), memory_type(fact/preference/event/relation), keywords(逗号分隔的关键词), importance(1-5重要性)";
+        return "记录一条关于用户的长期记忆。遇到以下情况必须调用（不等用户说'记住'）：" +
+               "1) 用户说了自己的事实：我是程序员、我高二了、我在北京、我家有只猫、我数学很烂。" +
+               "2) 用户表达了偏好：我喜欢喝奶茶、我讨厌下雨天、我不吃香菜。" +
+               "3) 用户提到了未来的事：下周五我生日、明天要考试、暑假要去日本。" +
+               "4) 用户说了和他人的关系：XX是我同学、YY是我哥。" +
+               "5) 用户情绪低落或高兴时说了原因：今天被老师骂了不开心、抽到SSR了好开心。" +
+               "铁律：看到以上任何一种情况→立即调此工具记下，不要等、不要犹豫。" +
+               "参数：user_id(用户QQ), group_id(群号), content(记忆内容，一句话), memory_type(fact/preference/event/relation), keywords(逗号分隔的关键词), importance(1-5重要性，普通事实3，重要偏好4，生日/大事件5)";
     }
 
     @Override

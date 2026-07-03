@@ -151,6 +151,28 @@ public class LongTermMemoryRepository implements Repository {
         }
     }
 
+    /** 查用户/群最近记忆，用于矛盾检测的扩展上下文 */
+    public List<LongTermMemory> findRecentByUser(String userId, String groupId, int limit) throws SQLException {
+        StringBuilder sql = new StringBuilder(
+                "SELECT * FROM long_term_memories WHERE user_id = ? AND group_id ");
+        boolean hasGroup = groupId != null && !groupId.isBlank();
+        sql.append(hasGroup ? "= ? AND triggered = FALSE " : "IS NULL AND triggered = FALSE ");
+        sql.append("ORDER BY created_at DESC LIMIT ?");
+
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            ps.setString(1, userId);
+            int idx = 2;
+            if (hasGroup) ps.setString(idx++, groupId);
+            ps.setInt(idx, limit);
+
+            ResultSet rs = ps.executeQuery();
+            List<LongTermMemory> results = new ArrayList<>();
+            while (rs.next()) results.add(mapRow(rs));
+            return results;
+        }
+    }
+
     /** 标记事件已触发 */
     public void markTriggered(long id) throws SQLException {
         String sql = "UPDATE long_term_memories SET triggered = TRUE WHERE id = ?";

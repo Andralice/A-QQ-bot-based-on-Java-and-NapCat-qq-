@@ -81,7 +81,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 
@@ -151,6 +150,7 @@ public class BaiLianService {
     private final ProfileProvider profileProvider = new ProfileProvider();
     private final MemoryService memoryService = new MemoryService();
     public void setMoodService(BotMoodService moodService) { this.moodService = moodService; }
+    public BotMoodService getMoodService() { return moodService; }
     public void setLifeEngine(CandyBearLifeEngine e) { this.lifeEngine = e; }
     public void setBotInstance(Main bot) { this.botInstance = bot; }
     public void setConversationMetrics(ConversationMetrics m) { this.metrics = m; }
@@ -402,6 +402,7 @@ public class BaiLianService {
         if (groupId != null) {
             recordUserInteraction(groupId, userId, reply);
             recordGroupContext(groupId, userId, "糖果熊", reply, "ai_reply");
+            aiDatabaseService.updateConversationThread(groupId, userId, reply);
 
             List<Long> msgHistory = botMessageHistory.computeIfAbsent(groupId, k -> new ArrayList<>());
             long now = System.currentTimeMillis();
@@ -474,12 +475,6 @@ public class BaiLianService {
 
     public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname, List<Long> atUserIds) {
         return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, false).reply();
-    }
-
-    /** 基于 ConversationSession 的生成入口。 */
-    public GenerationResult generate(com.start.runtime.conversation.ConversationSession session) {
-        return generate(session.sessionId(), session.userId(), session.userPrompt(),
-                session.groupId(), session.nickname(), session.atUserIds(), session.allowSilence());
     }
 
     /** 带沉默权的生成方法。allowSilence=true 时模型可以输出 <NO_REPLY> 选择沉默。 */
@@ -1092,6 +1087,7 @@ public class BaiLianService {
                 if (groupId != null) {
                     recordUserInteraction(groupId, userId, reply);
                     recordGroupContext(groupId, userId, "糖果熊", reply, "ai_reply");
+                    aiDatabaseService.updateConversationThread(groupId, userId, reply);
 
                     if (!reply.equals("抱歉，刚才走神了...") &&
                             !reply.equals("嗯...再问一次吧") &&

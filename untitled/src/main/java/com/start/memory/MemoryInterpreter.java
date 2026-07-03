@@ -28,11 +28,32 @@ public class MemoryInterpreter {
 
     /** 批量翻译 */
     public List<MemoryRecall> interpretAll(List<LongTermMemory> entities) {
+        return interpretAll(entities, null);
+    }
+
+    /** 批量翻译，使用扩展上下文做矛盾检测。conflictContext 中的记录不会被译出，仅参与 CONTRADICTED 判定。 */
+    public List<MemoryRecall> interpretAll(List<LongTermMemory> entities, List<LongTermMemory> conflictContext) {
         if (entities == null || entities.isEmpty()) return Collections.emptyList();
+
+        List<LongTermMemory> fullContext = new ArrayList<>(entities);
+        if (conflictContext != null) {
+            for (LongTermMemory m : conflictContext) {
+                boolean alreadyIncluded = false;
+                for (LongTermMemory e : entities) {
+                    if (e.getId() != null && e.getId().equals(m.getId())) {
+                        alreadyIncluded = true;
+                        break;
+                    }
+                }
+                if (!alreadyIncluded) {
+                    fullContext.add(m);
+                }
+            }
+        }
 
         List<MemoryRecall> recalls = new ArrayList<>(entities.size());
         for (LongTermMemory m : entities) {
-            recalls.add(interpret(m, entities));
+            recalls.add(interpret(m, fullContext));
         }
         return recalls;
     }
@@ -90,14 +111,6 @@ public class MemoryInterpreter {
     // ---- status ----
 
     private MemoryStatus determineStatus(LongTermMemory m, List<LongTermMemory> allUserMemories) {
-        // DB stored status overrides initial calculation
-        String dbStatus = m.getStatus();
-        if (dbStatus != null) {
-            try {
-                return MemoryStatus.valueOf(dbStatus.toUpperCase());
-            } catch (IllegalArgumentException ignored) {}
-        }
-
         LocalDateTime now = LocalDateTime.now(clock);
 
         // 检查是否有更新的矛盾记忆
@@ -109,8 +122,13 @@ public class MemoryInterpreter {
                 if (!other.getCreatedAt().isAfter(m.getCreatedAt())) continue;
 
                 Set<String> otherKeywords = splitKeywords(other.getKeywords());
-                if (!Collections.disjoint(myKeywords, otherKeywords)) {
-                    if (myKeywords.size() >= 2 && otherKeywords.size() >= 2) {
+                Set<String> intersection = new HashSet<>(myKeywords);
+                intersection.retainAll(otherKeywords);
+                int overlapCount = intersection.size();
+                if (overlapCount >= 2) {
+                    double myOverlapRatio = (double) overlapCount / myKeywords.size();
+                    double otherOverlapRatio = (double) overlapCount / otherKeywords.size();
+                    if (myOverlapRatio >= 0.5 || otherOverlapRatio >= 0.5) {
                         return MemoryStatus.CONTRADICTED;
                     }
                 }

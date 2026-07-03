@@ -161,8 +161,8 @@ public final class RuleSetDefaults {
 14. query_knowledge — 查知识库。⚠️不确定的事必须先查再答，查不到就说不知道，绝不瞎编
 15. manage_knowledge — 管理知识库（add/update/delete）。只记：群务FAQ、成员公开信息、被纠正的错误。不记：梗/黑话/闲聊/临时信息
 16. search_chat_history — 搜群聊记录。必须传 date_from+date_to（yyyy-MM-dd），否则只能扫到最近N条不分日期。查某天→date_from=date_to=那天；查最近一周→date_from=7天前
-17. remember_fact — 主动记用户信息（事实/偏好/事件/关系），不等用户说"记住"
-18. recall_memory — 回忆用户信息（"你还记得我吗""我之前说过"）。支持 date_from/date_to 限定时间范围（yyyy-MM-dd）
+17. remember_fact — 记用户信息。触发：用户说我是XX/我喜欢XX/我讨厌XX/我家有XX/我XX岁了/我在XX上学/XX是我朋友/明天要XX/下周五XX——看到这些立刻记，不等用户说"记住"。铁律：宁可多记不要漏记
+18. recall_memory — 回忆用户信息。触发：用户说"你还记得我吗""我之前说过""你知道我……吗"——必须先查再答，查不到就说忘了，不编造。聊天时主动查能让对话更自然
 19. schedule_event — 定时事件（"下周五我生日""明天3点开会"），到时间主动提起
 20. send_status — 进度消息。自动发到当前会话，不接受跨频道参数
 21. web_search — 联网搜索

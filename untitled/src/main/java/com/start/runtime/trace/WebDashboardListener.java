@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.runtime.RuntimeEvent;
 import com.start.runtime.RuntimeListener;
-import com.start.service.GenerationMetadata;
-import com.start.service.GenerationResult;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
@@ -31,7 +29,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Web 可观测性面板 — RuntimeListener，提供实时决策链路、群聊指标和系统健康。
+ * Web 可观测性面板，提供实时决策链路、群聊指标和系统健康。
  * 内嵌 HTTP 服务器，不依赖外部容器。不改 Runtime 一行代码。
  */
 public class WebDashboardListener implements RuntimeListener {
@@ -145,6 +143,18 @@ public class WebDashboardListener implements RuntimeListener {
         }
     }
 
+    /** 获取当前实例，供 EventBus 注册。 */
+    public static WebDashboardListener getInstance() { return instance; }
+
+    // ===== RuntimeListener 实现 =====
+
+    @Override
+    public void onEvent(RuntimeEvent e) {
+        if (e instanceof RuntimeEvent.MessageReceived m) {
+            recordMessage(m.groupId(), m.userId());
+        }
+    }
+
     /** 静态记录决策（供 AIHandler 等非 Runtime 路径直接调用）。 */
     public static void recordDecision(String groupId, String userId, String eventType,
                                        String decision, String reason, int toolCalls,
@@ -178,38 +188,6 @@ public class WebDashboardListener implements RuntimeListener {
         WebDashboardListener inst = instance;
         if (inst == null) return;
         inst.toolCallCounts.computeIfAbsent(toolName, k -> new AtomicLong()).incrementAndGet();
-    }
-
-    // ===== RuntimeListener 实现 =====
-
-    @Override
-    public void onEvent(RuntimeEvent e) {
-        if (e instanceof RuntimeEvent.MessageReceived m) {
-            totalMessages.incrementAndGet();
-            GroupSummary gs = groups.computeIfAbsent(m.groupId(), k -> new GroupSummary(k));
-            gs.messages.incrementAndGet();
-            gs.lastActive = System.currentTimeMillis();
-        } else if (e instanceof RuntimeEvent.CommitFinished f) {
-            GenerationResult r = f.result();
-            GenerationMetadata m = r != null ? r.metadata() : null;
-            String dec = r != null && r.isSilent() ? "SILENT"
-                    : r != null && r.isError() ? "ERROR" : "REPLY";
-            String reason = r != null && r.isSilent() ? "model_no_reply" : "ok";
-            int tools = m != null ? m.toolCalls() : 0;
-            int tokens = m != null ? m.tokensUsed() : 0;
-
-            addDecision(new DecisionEntry(System.currentTimeMillis(), f.groupId(), f.userId(),
-                    "COMMIT", dec, reason, tools, tokens, 0,
-                    m != null ? m.generation() : 0, m != null ? m.revision() : 0));
-
-            GroupSummary gs = groups.computeIfAbsent(f.groupId(), k -> new GroupSummary(k));
-            switch (dec) {
-                case "REPLY" -> { totalReplies.incrementAndGet(); gs.replies.incrementAndGet(); }
-                case "SILENT" -> { totalSilent.incrementAndGet(); gs.silent.incrementAndGet(); }
-                case "ERROR"  -> { totalErrors.incrementAndGet(); gs.errors.incrementAndGet(); }
-            }
-            if (tokens > 0) gs.totalTokens.addAndGet(tokens);
-        }
     }
 
     // ===== 内部方法 =====

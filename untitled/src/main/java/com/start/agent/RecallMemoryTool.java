@@ -35,7 +35,11 @@ public class RecallMemoryTool implements Tool {
     @Override public String getName() { return "recall_memory"; }
 
     @Override public String getDescription() {
-        return "检索关于某个用户的长期记忆。当用户说还记得我之前说过什么吗、你上次说、或者对话需要回忆以前的上下文时调用。" +
+        return "检索关于某个用户的长期记忆。遇到以下情况必须调用：" +
+               "1) 用户问你还记得吗、我之前说过、你上次说、你知道我……吗——必须先查再答。" +
+               "2) 和用户聊天时，如果能回忆起TA之前说过的事会让对话更自然——主动查。" +
+               "3) 用户提了一个你隐约有印象但不确定的事——查了再说，别靠'感觉'。" +
+               "查不到就直说'我不太记得了'，不要编造。" +
                "参数：user_id(用户QQ), group_id(群号), keyword(可选搜索关键词，不填则自动提取), count(返回条数，默认5), " +
                "date_from(可选，起始日期如2026-06-05), date_to(可选，结束日期)";
     }

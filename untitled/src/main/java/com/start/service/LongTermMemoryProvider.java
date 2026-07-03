@@ -38,7 +38,24 @@ public class LongTermMemoryProvider implements MemoryProvider {
             List<LongTermMemory> results = repo.search(query.userId(), query.groupId(),
                     query.keyword(), query.limit());
             if (results.isEmpty()) return Collections.emptyList();
-            return interpreter.interpretAll(results);
+
+            // 每次召回均更新计数和时间，不再区分自动/主动路径
+            for (LongTermMemory m : results) {
+                try {
+                    repo.markRecalled(m.getId());
+                    repo.markUsed(m.getId());
+                } catch (Exception ignored) {}
+            }
+
+            // 取最近记忆扩展矛盾检测上下文，避免仅限当前关键字批次
+            List<LongTermMemory> conflictContext = null;
+            if (results.size() >= 2) {
+                try {
+                    conflictContext = repo.findRecentByUser(query.userId(), query.groupId(), 30);
+                } catch (Exception ignored) {}
+            }
+
+            return interpreter.interpretAll(results, conflictContext);
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }

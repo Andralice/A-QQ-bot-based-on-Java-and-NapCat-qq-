@@ -4,11 +4,16 @@ import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.handler.CPTracker;
 import com.start.handler.HandlerRegistry;
+import com.start.runtime.conversation.ConversationRuntime;
+import com.start.runtime.trace.DecisionTraceListener;
+import com.start.runtime.trace.MetricsListener;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.model.LongTermMemory;
+import com.start.service.ConversationMetrics;
 import com.start.model.RecurringTask;
 import com.start.repository.*;
 import com.start.service.*;
+import com.start.util.DatabaseErrorHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,6 +32,12 @@ public final class BotBootstrap {
 
     /** 创建并装配所有核心服务，注入到 Main 实例。 */
     public static void wireServices(Main bot) {
+        // 启动时数据库连通性检查
+        if (!DatabaseErrorHandler.isDatabaseAvailable()) {
+            logger.error("数据库连接失败，请检查网络、SSH 隧道或数据库服务状态");
+            System.err.println("[FATAL] 数据库连接失败，请检查网络、SSH 隧道或数据库服务状态");
+        }
+
         // WebSocket API 封装
         bot.oneBotWsService = new OneBotWsService(bot);
 
@@ -55,9 +66,17 @@ public final class BotBootstrap {
         GroupSerialExecutor groupExecutor = new GroupSerialExecutor(4, 30_000);
         ServerAdminService shellService = new ServerAdminService();
 
+        // 运行时事件总线 + 监听器
+        ConversationRuntime runtime = new ConversationRuntime();
+        bot.conversationRuntime = runtime;
+        ConversationMetrics metrics = new ConversationMetrics();
+        bot.baiLianService.setConversationMetrics(metrics);
+        runtime.addListener(new MetricsListener(metrics));
+        runtime.addListener(new DecisionTraceListener());
+
         // Handler 注册中心
         ConversationManager conversationManager = new ConversationManager();
-        bot.handlerRegistry = new HandlerRegistry(bot.baiLianService, groupExecutor, bot, shellService, conversationManager);
+        bot.handlerRegistry = new HandlerRegistry(bot.baiLianService, groupExecutor, bot, shellService, conversationManager, runtime, metrics);
 
         // DashScope API Key
         if (BotConfig.getBaiLianApiKey() != null && !BotConfig.getBaiLianApiKey().isBlank()) {
@@ -88,12 +107,15 @@ public final class BotBootstrap {
         startEventChecker(bot);
         startRecurringScheduler(bot);
         startErrorMonitor(bot);
-        startDashboard();
+        startDashboard(bot);
     }
 
-    private static void startDashboard() {
+    private static void startDashboard(Main bot) {
         WebDashboardListener dashboard = new WebDashboardListener();
         dashboard.start();
+        if (bot.conversationRuntime != null) {
+            bot.conversationRuntime.addListener(dashboard);
+        }
     }
 
     private static void startLifeEngineThread(Main bot, CandyBearLifeEngine lifeEngine) {

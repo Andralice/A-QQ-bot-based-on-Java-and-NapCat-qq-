@@ -4,6 +4,7 @@ import com.start.agent.Tool;
 
 import com.start.config.BotConfig;
 import com.start.repository.EvolutionRecordRepository;
+import com.start.service.WorkspaceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,10 +22,9 @@ import java.util.regex.Pattern;
 /**
  * 自我进化工具 —— 糖果熊修改自己的 Java 源代码、编译、部署。
  *
- * 流程: stash → sync main → 临时分支 → 修改代码 → 编译 → 测试 → 打包 → 部署 JAR
- *       → squash merge 到 main → push origin/main → 删除临时分支
- * 任何一步失败都回滚：切回 main，删除临时分支，恢复 .bak。
- * main 是唯一 Source of Truth，不再使用 auto-evolve 长期分支。
+ * 流程: sync main → 沙箱副本 → 修改代码 → 编译(沙箱) → 测试(沙箱) → diff → apply
+ *       → git commit → push origin/main
+ * 任何一步失败只需 discard 沙箱，真实项目始终保持干净。
  */
 public class SelfEvolveTool implements Tool {
 
@@ -33,6 +33,7 @@ public class SelfEvolveTool implements Tool {
     private final String realUserId;
     private final Path projectRoot;
     private final EvolutionRecordRepository evoRepo;
+    private final WorkspaceManager workspaceManager;
 
     private static final int COMPILE_TIMEOUT_SECONDS = 120;
 
@@ -40,28 +41,29 @@ public class SelfEvolveTool implements Tool {
         this.realUserId = "0";
         this.projectRoot = detectProjectRoot();
         this.evoRepo = null;
+        this.workspaceManager = new WorkspaceManager();
     }
 
     public SelfEvolveTool(String realUserId) {
         this.realUserId = realUserId;
         this.projectRoot = detectProjectRoot();
         this.evoRepo = null;
+        this.workspaceManager = new WorkspaceManager();
     }
 
     public SelfEvolveTool(String realUserId, EvolutionRecordRepository evoRepo) {
         this.realUserId = realUserId;
         this.projectRoot = detectProjectRoot();
         this.evoRepo = evoRepo;
+        this.workspaceManager = new WorkspaceManager();
     }
 
     private static Path detectProjectRoot() {
-        // 尝试从当前工作目录或 classpath 推断项目根目录
         String cwd = System.getProperty("user.dir");
         Path cwdPath = Paths.get(cwd);
         if (Files.exists(cwdPath.resolve("pom.xml"))) {
             return cwdPath.toAbsolutePath().normalize();
         }
-        // 回退: 假设在 /opt/qq-bot 或项目目录
         Path optPath = Paths.get("/opt/qq-bot");
         if (Files.exists(optPath.resolve("pom.xml"))) {
             return optPath;
@@ -80,8 +82,8 @@ public class SelfEvolveTool implements Tool {
                "old_snippet(文件中要替换的精确代码片段, 必须与文件内容完全一致, 含缩进和换行)\n" +
                "new_snippet(替换后的新代码片段, 缩进需与原文一致)\n" +
                "reason(一句话说明为什么改)。\n" +
-               "流程: 创建临时分支 → 替换代码 → mvn编译测试打包 → squash merge到main → push origin/main。\n" +
-               "编译失败自动回滚(切回main、删除临时分支、恢复.bak)。\n" +
+               "流程: 同步main → 沙箱隔离修改 → 编译测试 → diff审查 → 应用 → git提交推送。\n" +
+               "编译失败自动丢弃沙箱，真实项目不受影响。\n" +
                "如果返回'未找到old_snippet'，说明代码片段不匹配，请重新cat文件确认。\n" +
                "仅管理员(归儿)可用。";
     }
@@ -140,93 +142,70 @@ public class SelfEvolveTool implements Tool {
             return "文件路径不合法（试图访问项目外文件）: " + targetFile;
         }
 
-        if (!Files.exists(filePath)) {
-            return "文件不存在: " + filePath;
+        // ---- Step 1: 同步 main 到最新 ----
+        try {
+            runCommandInDir(projectRoot, "git", "checkout", "main");
+            runCommandInDir(projectRoot, "git", "fetch", "origin", "main");
+            String mergeOut = runCommandInDir(projectRoot, "git", "merge", "origin/main", "--no-edit");
+            logger.info("已同步 origin/main: {}", mergeOut.trim());
+        } catch (Exception e) {
+            logger.warn("同步 main 失败: {}", e.getMessage());
+            try { runCommandInDir(projectRoot, "git", "merge", "--abort"); } catch (Exception ignored) {}
+            return "同步 main 分支失败: " + e.getMessage() + "。请手动解决冲突后再试。";
+        }
+
+        // ---- Step 2: 创建沙箱工作区 ----
+        Path sandboxRoot;
+        try {
+            sandboxRoot = workspaceManager.create();
+        } catch (IOException e) {
+            return "创建沙箱工作区失败: " + e.getMessage();
         }
 
         try {
-            // ---- Step 1: 暂存本地变更 ----
-            boolean stashed = stashLocalChanges();
-
-            // ---- Step 2: 同步 main 到最新 ----
-            try {
-                runCommand("git", "checkout", "main");
-                runCommand("git", "fetch", "origin", "main");
-                String mergeOut = runCommand("git", "merge", "origin/main", "--no-edit");
-                logger.info("已同步 origin/main: {}", mergeOut.trim());
-            } catch (Exception e) {
-                logger.warn("同步 main 失败: {}", e.getMessage());
-                try { runCommand("git", "merge", "--abort"); } catch (Exception ignored) {}
-                popStash(stashed);
-                return "同步 main 分支失败: " + e.getMessage() + "。请手动解决冲突后再试。";
+            // ---- Step 3: 在沙箱中读取并修改文件 ----
+            Path sandboxFile = sandboxRoot.resolve(targetFile).normalize();
+            if (!Files.exists(sandboxFile)) {
+                return "沙箱中文件不存在: " + targetFile;
             }
 
-            // ---- Step 3: 创建临时进化分支 ----
-            String branchName = "evolve/" + java.time.LocalDateTime.now()
-                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmm"));
-            try {
-                runCommand("git", "checkout", "-b", branchName);
-                logger.info("已创建临时分支: {}", branchName);
-            } catch (Exception e) {
-                popStash(stashed);
-                return "创建临时分支失败: " + e.getMessage();
-            }
+            String originalContent = Files.readString(sandboxFile);
 
-            // ---- Step 4: 读取原始文件 ----
-            String originalContent = Files.readString(filePath);
-
-            // ---- Step 5: 验证 old_snippet 存在且唯一 ----
+            // 验证 old_snippet 存在且唯一
             int count = countOccurrences(originalContent, oldSnippet);
             if (count == 0) {
-                abortBranch(branchName, stashed);
                 return "在文件中未找到 old_snippet。请确认代码片段与文件内容完全一致（包括缩进和换行）。\n" +
                        "文件: " + targetFile;
             }
             if (count > 1) {
-                abortBranch(branchName, stashed);
                 return "old_snippet 在文件中出现了 " + count + " 次，不够精确。请扩大 old_snippet 包含更多上下文使其唯一。\n" +
                        "文件: " + targetFile;
             }
 
-            // ---- Step 6: 备份（在临时分支上） ----
-            Path bakPath = filePath.resolveSibling(filePath.getFileName() + ".bak");
-            Files.copy(filePath, bakPath, StandardCopyOption.REPLACE_EXISTING);
-
-            try {
-                runCommand("git", "add", "-A");
-                runCommand("git", "commit", "-m", "backup: before self-evolve — " + reason);
-            } catch (Exception e) {
-                logger.debug("git 备份跳过（可能不在 git 仓库中）");
-            }
-
-            // ---- Step 7: 写入新内容 ----
+            // 写入新内容
             String newContent = originalContent.replace(oldSnippet, newSnippet);
-            Files.writeString(filePath, newContent);
-            logger.info("已修改文件: {}", targetFile);
+            Files.writeString(sandboxFile, newContent);
+            logger.info("已在沙箱中修改文件: {}", targetFile);
 
-            // ---- Step 8: 编译 ----
+            // ---- Step 4: 编译（在沙箱中） ----
             String[] mvnBase = getMvnCommand();
             String[] compileCmd = buildMvnCmd(mvnBase, "compile", "-q");
-            CmdResult compileResult = runCommandWithTimeout(compileCmd);
+            CmdResult compileResult = runCommandWithTimeoutInDir(sandboxRoot, compileCmd);
 
             if (compileResult.timedOut()) {
-                revertFile(filePath, originalContent);
-                abortBranch(branchName, stashed);
                 recordEvolve(targetFile, reason, "compile_timeout", "编译超时（>" + COMPILE_TIMEOUT_SECONDS + "秒）", false);
-                return "编译超时（>" + COMPILE_TIMEOUT_SECONDS + "秒），已回滚。";
+                return "编译超时（>" + COMPILE_TIMEOUT_SECONDS + "秒），沙箱已丢弃。";
             }
             if (!compileResult.ok()) {
-                revertFile(filePath, originalContent);
-                abortBranch(branchName, stashed);
                 String shortError = compileResult.output().length() > 1500
                         ? compileResult.output().substring(0, 1500) + "\n... [截断]" : compileResult.output();
                 recordEvolve(targetFile, reason, "compile_fail", shortError, false);
-                return "编译失败，已自动回滚。\n\n编译错误:\n" + shortError;
+                return "编译失败，沙箱已丢弃。\n\n编译错误:\n" + shortError;
             }
 
-            // ---- Step 9: 跑测试 ----
+            // ---- Step 5: 测试（在沙箱中） ----
             String[] testCmd = buildMvnCmd(mvnBase, "test");
-            CmdResult testResult = runCommandWithTimeout(testCmd);
+            CmdResult testResult = runCommandWithTimeoutInDir(sandboxRoot, testCmd);
             String testSummary;
             if (testResult.timedOut()) {
                 testSummary = "⚠ 测试超时，跳过验证。";
@@ -236,26 +215,38 @@ public class SelfEvolveTool implements Tool {
                 testSummary = parseTestResults(testResult.output());
             }
 
-            // ---- Step 10: 打包 ----
+            // ---- Step 6: 打包（在沙箱中） ----
             String[] packageCmd = buildMvnCmd(mvnBase, "package", "-DskipTests", "-q");
-            CmdResult pkgResult = runCommandWithTimeout(packageCmd);
+            CmdResult pkgResult = runCommandWithTimeoutInDir(sandboxRoot, packageCmd);
 
             if (pkgResult.timedOut()) {
-                revertFile(filePath, originalContent);
-                abortBranch(branchName, stashed);
                 recordEvolve(targetFile, reason, "package_timeout", "打包超时", false);
-                return "打包超时，已回滚。";
+                return "打包超时，沙箱已丢弃。";
             }
             if (!pkgResult.ok()) {
-                revertFile(filePath, originalContent);
-                abortBranch(branchName, stashed);
                 String pkgError = pkgResult.output().length() > 1500
                         ? pkgResult.output().substring(0, 1500) : pkgResult.output();
                 recordEvolve(targetFile, reason, "package_fail", pkgError, false);
-                return "打包失败，已回滚。\n\n" + pkgError;
+                return "打包失败，沙箱已丢弃。\n\n" + pkgError;
             }
 
-            // ---- Step 11: 部署 JAR（生产服务器） ----
+            // ---- Step 7: 生成 diff 供审查 ----
+            String diffOutput;
+            try {
+                diffOutput = workspaceManager.diff();
+            } catch (IOException e) {
+                diffOutput = "diff 生成失败: " + e.getMessage();
+            }
+
+            // ---- Step 8: 应用沙箱修改到真实项目 ----
+            try {
+                workspaceManager.apply();
+            } catch (IOException e) {
+                recordEvolve(targetFile, reason, "apply_fail", e.getMessage(), false);
+                return "应用修改到项目失败: " + e.getMessage();
+            }
+
+            // ---- Step 9: 部署 JAR ----
             String jarName = detectJarName();
             String os = System.getProperty("os.name", "").toLowerCase();
 
@@ -279,7 +270,6 @@ public class SelfEvolveTool implements Tool {
                     logger.info("JAR 已部署到: {}", serverJar);
                 }
             } else {
-                abortBranch(branchName, stashed);
                 return "打包完成但未找到 JAR 文件。\n"
                         + "在以下位置均未找到 " + jarName + ":\n"
                         + "  - " + projectRoot.resolve("target").resolve(jarName) + "\n"
@@ -287,16 +277,31 @@ public class SelfEvolveTool implements Tool {
                         + "请检查 mvn package 是否正确执行，或手动检查 target/ 目录。";
             }
 
-            // ---- Step 12: 清理 ----
-            Files.deleteIfExists(bakPath);
-            logger.info("自我进化成功: {} — {}", targetFile, reason);
-
-            // ---- Step 13: 合并到 main 并推送 ----
+            // ---- Step 10: Git 提交并推送 ----
             boolean shouldPush = args.get("push_to_git") instanceof Boolean b && b;
-            String pushResult = mergeToMainAndPush(branchName, targetFile, reason, shouldPush);
+            String pushResult = "";
+            try {
+                runCommandInDir(projectRoot, "git", "add", targetFile);
+                runCommandInDir(projectRoot, "git", "commit", "-m", "self-evolve: " + reason);
+                if (shouldPush) {
+                    try {
+                        runCommandInDir(projectRoot, "git", "push", "origin", "main");
+                        pushResult = "\n已推送到 origin/main。";
+                    } catch (Exception e) {
+                        pushResult = "\ngit push 失败: " + e.getMessage() + "。已提交到本地 main，请手动推送。";
+                    }
+                } else {
+                    pushResult = "\n已提交到本地 main（未推送）。";
+                }
+            } catch (Exception e) {
+                pushResult = "\ngit 提交失败: " + e.getMessage();
+            }
 
-            popStash(stashed);
+            logger.info("自我进化成功: {} — {}", targetFile, reason);
             recordEvolve(targetFile, reason, "success", null, shouldPush);
+
+            String diffSummary = diffOutput.length() > 2000
+                    ? diffOutput.substring(0, 2000) + "\n... [截断]" : diffOutput;
 
             return "自我进化成功！\n" +
                    "文件: " + targetFile + "\n" +
@@ -304,94 +309,16 @@ public class SelfEvolveTool implements Tool {
                    "编译: 通过\n" +
                    testSummary + "\n" +
                    (os.contains("win") ? "JAR 在 target/ 目录。" + pushResult
-                           : "新 JAR 已部署到 /opt/qq-bot/。" + pushResult + " 或使用 restart_bot 重启。");
+                           : "新 JAR 已部署到 /opt/qq-bot/。" + pushResult) + "\n\n" +
+                   "--- diff ---\n" + diffSummary;
 
         } catch (Exception e) {
             logger.error("自我进化失败", e);
             recordEvolve(targetFile, reason, "error", e.getMessage(), false);
-            try {
-                Path bakPath = filePath.resolveSibling(filePath.getFileName() + ".bak");
-                if (Files.exists(bakPath)) {
-                    Files.move(bakPath, filePath, StandardCopyOption.REPLACE_EXISTING);
-                }
-            } catch (Exception ignored) {}
-            try { runCommand("git", "checkout", "main"); } catch (Exception ignored) {}
             return "自我进化过程异常: " + e.getMessage();
-        }
-    }
-
-    private void revertFile(Path filePath, String originalContent) {
-        try {
-            Files.writeString(filePath, originalContent);
-            logger.info("已回滚文件: {}", filePath);
-        } catch (IOException e) {
-            logger.error("回滚文件失败: {}", filePath, e);
-        }
-    }
-
-    /** 暂存本地未提交变更，返回 true 表示有内容被 stash。 */
-    private boolean stashLocalChanges() {
-        try {
-            String out = runCommand("git", "stash", "push", "-m", "self-evolve-auto-stash");
-            if (out.contains("No local changes to save")) {
-                return false;
-            }
-            logger.info("已暂存本地变更");
-            return true;
-        } catch (Exception e) {
-            logger.debug("git stash 跳过: {}", e.getMessage());
-            return false;
-        }
-    }
-
-    private void popStash(boolean stashed) {
-        if (!stashed) return;
-        try {
-            runCommand("git", "stash", "pop");
-            logger.info("已恢复本地变更");
-        } catch (Exception e) {
-            logger.warn("git stash pop 失败，本地变更留在 stash 中: {}", e.getMessage());
-        }
-    }
-
-    /** 终止临时分支：切回 main，删除临时分支，恢复 stash。 */
-    private void abortBranch(String branchName, boolean stashed) {
-        try { runCommand("git", "checkout", "main"); } catch (Exception ignored) {}
-        try { runCommand("git", "branch", "-D", branchName); } catch (Exception ignored) {}
-        popStash(stashed);
-    }
-
-    /** 将临时分支 squash merge 到 main，可选 push 到 origin/main。返回推送结果描述。 */
-    private String mergeToMainAndPush(String branchName, String targetFile, String reason, boolean shouldPush) {
-        try {
-            // 在临时分支上提交修改
-            runCommand("git", "add", targetFile);
-            runCommand("git", "commit", "-m", "self-evolve: " + reason);
-
-            // 切回 main，squash merge
-            runCommand("git", "checkout", "main");
-            runCommand("git", "merge", "--squash", branchName);
-            runCommand("git", "commit", "-m", "self-evolve: " + reason);
-
-            // 删除临时分支
-            runCommand("git", "branch", "-D", branchName);
-            logger.info("已 squash merge {} → main", branchName);
-
-            if (shouldPush) {
-                try {
-                    runCommand("git", "push", "origin", "main");
-                    return "\n已推送到 origin/main。";
-                } catch (Exception e) {
-                    return "\ngit push 失败: " + e.getMessage() + "。已合并到本地 main，请手动推送。";
-                }
-            }
-            return "\n已合并到本地 main（未推送）。";
-        } catch (Exception e) {
-            // merge 失败：回退到 main，保留临时分支供人工处理
-            try { runCommand("git", "checkout", "main"); } catch (Exception ignored) {}
-            try { runCommand("git", "merge", "--abort"); } catch (Exception ignored) {}
-            logger.error("合并到 main 失败，临时分支 {} 已保留: {}", branchName, e.getMessage());
-            return "\n合并到 main 失败: " + e.getMessage() + "。临时分支 " + branchName + " 已保留。";
+        } finally {
+            // 无论成功失败，丢弃沙箱
+            workspaceManager.discard();
         }
     }
 
@@ -409,10 +336,10 @@ public class SelfEvolveTool implements Tool {
     /** 命令执行结果 */
     private record CmdResult(boolean ok, String output, boolean timedOut) {}
 
-    private String runCommand(String... cmd) {
+    private String runCommandInDir(Path dir, String... cmd) {
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.directory(projectRoot.toFile());
+            pb.directory(dir.toFile());
             pb.redirectErrorStream(true);
             Process p = pb.start();
             String output = new String(p.getInputStream().readAllBytes());
@@ -424,16 +351,16 @@ public class SelfEvolveTool implements Tool {
         }
     }
 
-    private CmdResult runCommandWithTimeout(String... cmd) {
+    private CmdResult runCommandWithTimeoutInDir(Path dir, String... cmd) {
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.directory(projectRoot.toFile());
+            pb.directory(dir.toFile());
             pb.redirectErrorStream(true);
             Process p = pb.start();
             boolean finished = p.waitFor(COMPILE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
-                return new CmdResult(false, "", true); // timeout
+                return new CmdResult(false, "", true);
             }
             String output = new String(p.getInputStream().readAllBytes());
             int exitCode = p.exitValue();
@@ -449,7 +376,6 @@ public class SelfEvolveTool implements Tool {
     }
 
     private String detectJarName() {
-        // 从 pom.xml 读取 artifactId 和 version 拼接 JAR 名
         Path pomPath = projectRoot.resolve("pom.xml");
         try {
             String pom = Files.readString(pomPath);
@@ -457,7 +383,6 @@ public class SelfEvolveTool implements Tool {
             String version = extractXmlTag(pom, "version");
             if (artifactId != null && !artifactId.isBlank()) {
                 if (version == null || version.isBlank()) version = "1.0-SNAPSHOT";
-                // 如果 version 包含 ${...} 占位符，用默认值
                 if (version.contains("${")) version = "1.0-SNAPSHOT";
                 return artifactId.trim() + "-" + version.trim() + ".jar";
             }
@@ -481,7 +406,6 @@ public class SelfEvolveTool implements Tool {
     }
 
     private String parseTestResults(String output) {
-        // 提取 mvn test 的关键信息
         StringBuilder sb = new StringBuilder("测试结果:\n");
         for (String line : output.split("\n")) {
             if (line.contains("Tests run:") || line.contains("Failures:") ||
@@ -491,7 +415,6 @@ public class SelfEvolveTool implements Tool {
                 sb.append(line.trim()).append("\n");
             }
         }
-        // 提取失败测试详情
         int failIdx = output.indexOf("Failed tests:");
         if (failIdx >= 0) {
             String failPart = output.substring(failIdx);

@@ -1,9 +1,5 @@
 package com.start.model;
 
-import com.start.runtime.RuntimeEvent;
-import com.start.service.GenerationMetadata;
-import com.start.service.GenerationResult;
-
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -38,24 +34,6 @@ public class DecisionTrace {
         this.generation = generation;
         this.revision = revision;
         this.allowSilence = allowSilence;
-    }
-
-    /** 从 CommitFinished 事件构造 */
-    public static DecisionTrace from(RuntimeEvent.CommitFinished f) {
-        GenerationResult r = f.result();
-        GenerationMetadata m = r != null ? r.metadata() : null;
-        String dec = r != null && r.isSilent() ? "SILENT"
-                : r != null && r.isError() ? "ERROR" : "REPLY";
-        return new DecisionTrace(
-                System.currentTimeMillis(), f.groupId(), f.userId(),
-                "COMMIT", dec,
-                r != null && r.isSilent() ? "model_no_reply" : "ok",
-                m != null ? m.toolCalls() : 0,
-                m != null ? m.tokensUsed() : 0,
-                f.latencyMs(),
-                m != null ? m.generation() : 0,
-                m != null ? m.revision() : 0,
-                false);
     }
 
     /** 紧凑的单行日志格式 */

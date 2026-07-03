@@ -91,6 +91,9 @@ public class Main extends WebSocketClient {
     /** 事件处理器注册中心，用于动态绑定不同消息类型的处理逻辑。 */
     HandlerRegistry handlerRegistry;
 
+    /** 运行时事件总线，AIHandler 触发事件，Listener 消费。 */
+    com.start.runtime.conversation.ConversationRuntime conversationRuntime;
+
     /** 防刷检测器，防止高频消息攻击或滥用。 */
     SpamDetector spamDetector;
 

@@ -116,6 +116,18 @@ public class AIDatabaseService {
         }
     }
 
+    /** 更新对话线程（不重复保存消息，仅更新 thread 记录） */
+    public void updateConversationThread(String groupId, String userId, String lastBotReply) {
+        try {
+            if (groupId != null) {
+                String threadKey = "group_" + groupId + "_" + userId;
+                threadRepo.createOrUpdateThread(threadKey, groupId, userId, lastBotReply);
+            }
+        } catch (Exception e) {
+            System.err.println("更新对话线程失败: " + e.getMessage());
+        }
+    }
+
     /**
      * 获取对话历史
      */

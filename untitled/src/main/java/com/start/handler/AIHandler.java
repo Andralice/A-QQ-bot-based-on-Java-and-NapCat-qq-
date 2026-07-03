@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.service.BaiLianService;
+import com.start.service.BotMoodService;
 import com.start.service.ConversationEvent;
 import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationManager;
@@ -17,6 +18,8 @@ import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
 import com.start.model.DecisionTrace;
+import com.start.runtime.conversation.ConversationRuntime;
+import com.start.runtime.RuntimeEvent;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.util.MessageUtil;
 import com.start.vision.ImageUtils;
@@ -48,10 +51,12 @@ public class AIHandler implements MessageHandler {
     private static final long MAX_QUEUE_MS = 30_000; // 排队超过30秒则丢弃
 
     private final BaiLianService aiService;
+    private final BotMoodService moodService;
     private final GroupSerialExecutor groupExecutor;
     private final ConversationManager conversationManager;
     private final ConversationInterpreter interpreter;
     private final ConversationMetrics metrics;
+    private final ConversationRuntime runtime;
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private static final long USER_REACTION_COOLDOWN_MS = 2000;
@@ -60,12 +65,14 @@ public class AIHandler implements MessageHandler {
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
-                     ConversationInterpreter interpreter, ConversationMetrics metrics) {
+                     ConversationInterpreter interpreter, ConversationMetrics metrics, ConversationRuntime runtime) {
         this.aiService = aiService;
+        this.moodService = aiService.getMoodService();
         this.groupExecutor = groupExecutor;
         this.conversationManager = conversationManager;
         this.interpreter = interpreter;
         this.metrics = metrics;
+        this.runtime = runtime;
     }
 
     @Override
@@ -144,6 +151,14 @@ public class AIHandler implements MessageHandler {
         String gid = String.valueOf(groupId);
         String uid = String.valueOf(userId);
 
+        // 群聊情绪追踪
+        if (moodService != null) {
+            moodService.recordGroupActivity(gid);
+            if (ats.contains(BotConfig.getBotQq())) {
+                moodService.onMentioned(gid);
+            }
+        }
+
         // 缓冲消息到 ConversationState（WebSocket 线程）
         ConversationState conv = conversationManager.getOrCreate(gid, uid);
         conv.addMessage(plainText);
@@ -181,8 +196,7 @@ public class AIHandler implements MessageHandler {
         }
 
         // 记录群聊节奏
-        metrics.recordMessage(gid, uid);
-        WebDashboardListener.recordMessage(gid, uid);
+        runtime.fire(new RuntimeEvent.MessageReceived(gid, uid, plainText));
 
         // ConversationInterpreter 识别事件类型
         ConversationInterpreter.InterpretResult result = interpreter.interpret(
@@ -318,8 +332,7 @@ public class AIHandler implements MessageHandler {
                 // 模型沉默 — 直接退出
                 if (genResult.isSilent()) {
                     long elapsed = System.currentTimeMillis() - startMs;
-                    logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
-                            "SILENT", "model_no_reply", genResult.toolCalls(), genResult.tokensUsed(), elapsed);
+                    runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed));
                     conversationManager.remove(gid, userId);
                     return;
                 }
@@ -352,9 +365,8 @@ public class AIHandler implements MessageHandler {
                 sendSplitGroupReplies(bot, groupId, reply);
                 aiService.commitGeneration("group_" + groupId + "_" + userId, userId,
                         state.getMergedText(), reply, gid);
-                metrics.recordAiReply(gid);
-                logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
-                        "REPLY", "ok", genResult.toolCalls(), genResult.tokensUsed(), elapsed);
+                if (moodService != null) moodService.onBotSpeak(gid);
+                runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed));
             } else {
                 bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
                 logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
