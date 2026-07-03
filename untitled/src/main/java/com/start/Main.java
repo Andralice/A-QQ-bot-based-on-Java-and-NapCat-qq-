@@ -92,7 +92,7 @@ public class Main extends WebSocketClient {
     HandlerRegistry handlerRegistry;
 
     /** 运行时事件总线，AIHandler 触发事件，Listener 消费。 */
-    com.start.runtime.conversation.ConversationRuntime conversationRuntime;
+    com.start.runtime.ConversationRuntime conversationRuntime;
 
     /** 防刷检测器，防止高频消息攻击或滥用。 */
     SpamDetector spamDetector;

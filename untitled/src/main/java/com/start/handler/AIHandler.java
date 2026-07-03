@@ -12,13 +12,12 @@ import com.start.service.BotMoodService;
 import com.start.service.ConversationEvent;
 import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationManager;
-import com.start.service.ConversationMetrics;
 import com.start.service.ConversationState;
 import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
 import com.start.model.DecisionTrace;
-import com.start.runtime.conversation.ConversationRuntime;
+import com.start.runtime.ConversationRuntime;
 import com.start.runtime.RuntimeEvent;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.util.MessageUtil;
@@ -55,7 +54,6 @@ public class AIHandler implements MessageHandler {
     private final GroupSerialExecutor groupExecutor;
     private final ConversationManager conversationManager;
     private final ConversationInterpreter interpreter;
-    private final ConversationMetrics metrics;
     private final ConversationRuntime runtime;
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
@@ -65,13 +63,12 @@ public class AIHandler implements MessageHandler {
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
-                     ConversationInterpreter interpreter, ConversationMetrics metrics, ConversationRuntime runtime) {
+                     ConversationInterpreter interpreter, ConversationRuntime runtime) {
         this.aiService = aiService;
         this.moodService = aiService.getMoodService();
         this.groupExecutor = groupExecutor;
         this.conversationManager = conversationManager;
         this.interpreter = interpreter;
-        this.metrics = metrics;
         this.runtime = runtime;
     }
 

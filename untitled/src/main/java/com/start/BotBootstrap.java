@@ -4,7 +4,7 @@ import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.handler.CPTracker;
 import com.start.handler.HandlerRegistry;
-import com.start.runtime.conversation.ConversationRuntime;
+import com.start.runtime.ConversationRuntime;
 import com.start.runtime.trace.DecisionTraceListener;
 import com.start.runtime.trace.MetricsListener;
 import com.start.runtime.trace.WebDashboardListener;
@@ -76,7 +76,7 @@ public final class BotBootstrap {
 
         // Handler 注册中心
         ConversationManager conversationManager = new ConversationManager();
-        bot.handlerRegistry = new HandlerRegistry(bot.baiLianService, groupExecutor, bot, shellService, conversationManager, runtime, metrics);
+        bot.handlerRegistry = new HandlerRegistry(bot.baiLianService, groupExecutor, bot, shellService, conversationManager, runtime);
 
         // DashScope API Key
         if (BotConfig.getBaiLianApiKey() != null && !BotConfig.getBaiLianApiKey().isBlank()) {
