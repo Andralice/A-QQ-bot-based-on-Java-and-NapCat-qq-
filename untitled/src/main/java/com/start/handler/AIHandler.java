@@ -175,6 +175,12 @@ public class AIHandler implements MessageHandler {
         if (replyId != null) conv.setReplyToMessageId(replyId);
         conv.incrementRevision();
 
+        // Thread 更新：每条群消息都维护群级 Thread 状态
+        // 提交到 groupExecutor，保证与 AI 生成串行、不阻塞 WebSocket 线程
+        groupExecutor.execute(gid, () -> {
+            aiService.processThreadMessage(gid, uid, plainText);
+        });
+
         // 明确触发（#ai / !ai / @）
         if (isExplicitTrigger(msg, rawMessage)) {
             aiService.cancelPendingAwait(gid, uid);

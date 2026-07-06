@@ -55,13 +55,20 @@ import com.start.agent.DigestTool;
 import com.start.agent.SearchDigestTool;
 import com.start.agent.evo.EvolutionHistoryTool;
 import com.start.agent.QueryImagesTool;
+import com.start.agent.SetWorkingMemoryTool;
+import com.start.model.WorkingMemory;
 import com.start.repository.BeliefRepository;
 import com.start.repository.MessageRepository;
 import com.start.repository.RecurringTaskRepository;
+import com.start.repository.ThreadRepository;
+import com.start.repository.WorkingMemoryRepository;
 import com.start.service.EggGroupDataCenter;
+import com.start.thread.SceneState;
+import com.start.thread.ThreadManager;
 import com.hankcs.hanlp.HanLP;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
+import com.start.model.ConversationThread;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.UserAliasRepository;
@@ -150,6 +157,8 @@ public class BaiLianService {
     private ConversationMetrics metrics;
     private final PromptBuilder promptBuilder = new PromptBuilder();
     private final ProfileProvider profileProvider = new ProfileProvider();
+    private ThreadManager threadManager;
+    private final ConcurrentHashMap<String, Long> lastThreadUpdateMs = new ConcurrentHashMap<>();
     public void setMoodService(BotMoodService moodService) { this.moodService = moodService; }
     public BotMoodService getMoodService() { return moodService; }
     public void setLifeEngine(CandyBearLifeEngine e) { this.lifeEngine = e; }
@@ -158,6 +167,37 @@ public class BaiLianService {
     public ConversationMetrics getConversationMetrics() { return metrics; }
     public GameStateService getGameStateService() { return gameStateService; }
     public BotMemoryService getBotMemory() { return botMemory; }
+
+    public ThreadManager getThreadManager() {
+        if (threadManager == null) {
+            threadManager = new ThreadManager(
+                    new ThreadRepository(DatabaseConfig.getDataSource()),
+                    (groupId, count) -> {
+                        Deque<PublicMessage> history = publicGroupHistory.get(groupId);
+                        if (history == null || history.isEmpty()) return java.util.List.of();
+                        java.util.List<PublicMessage> all = new java.util.ArrayList<>(history);
+                        int start = Math.max(0, all.size() - count);
+                        return all.subList(start, all.size()).stream()
+                                .map(m -> m.content)
+                                .collect(Collectors.toList());
+                    });
+        }
+        return threadManager;
+    }
+
+    /** AIHandler 调用：将消息归入 Thread 并更新群聊场景。同群 5 秒内去重。 */
+    public void processThreadMessage(String groupId, String userId, String message) {
+        if (groupId == null) return;
+        long now = System.currentTimeMillis();
+        Long last = lastThreadUpdateMs.get(groupId);
+        if (last != null && now - last < 5000) return;
+        lastThreadUpdateMs.put(groupId, now);
+        try {
+            getThreadManager().processMessage(groupId, userId, message, BOT_QQ);
+        } catch (Exception e) {
+            logger.debug("Thread processing skipped: {}", e.getMessage());
+        }
+    }
 
     private final String baiLianApiKey = BotConfig.getBaiLianApiKey();
     private final String baiLianBaseUrl = BotConfig.getBaiLianBaseUrl();
@@ -592,6 +632,35 @@ public class BaiLianService {
                 }
             }
 
+            // 群聊场景加载（ConversationThread → SceneState）
+            WorkingMemory wm = null;
+            if (groupId != null && threadManager != null) {
+                try {
+                    SceneState scene = threadManager.getScene(groupId, BOT_QQ);
+                    if (scene != null && !scene.isEmpty()) {
+                        ctx.sceneState(scene);
+                        // 工作记忆加载（绑定当前 Thread 的 WorkingMemory）
+                        Long currentThreadId = findCurrentThreadId(scene);
+                        if (currentThreadId != null) {
+                            WorkingMemoryRepository wmRepo = new WorkingMemoryRepository(DatabaseConfig.getDataSource());
+                            wm = wmRepo.findActiveByThread(currentThreadId);
+                            if (wm != null) {
+                                ctx.workingMemory(wm);
+                                // P1: Belief 按 Thread participants 过滤（仅在任务模式下生效）
+                                ConversationThread currentThread = scene.activeThreads().stream()
+                                        .filter(t -> t.getId().equals(currentThreadId))
+                                        .findFirst().orElse(null);
+                                if (currentThread != null && !currentThread.getParticipants().contains(userId)) {
+                                    ctx.beliefRecalls(null);
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.debug("Scene loading skipped: {}", e.getMessage());
+                }
+            }
+
             String overridePrompt = runtimeConfig.get("system_prompt_override");
             String promptPatch = runtimeConfig.get("system_prompt_patch");
             ctx.promptPatch(promptPatch);
@@ -695,7 +764,7 @@ public class BaiLianService {
 
             EvolutionRecordRepository evoRepo = new EvolutionRecordRepository(DatabaseConfig.getDataSource());
 
-            final List<Tool> availableTools = Arrays.asList(
+            final List<Tool> availableTools = new ArrayList<>(Arrays.asList(
                     new WeatherTool(userAliasRepo),
                     new UserAffinityTool(userAffinityRepo),
                     new UserAliasTool(userAliasRepo, String.valueOf(BotConfig.getBotQq())),
@@ -715,7 +784,6 @@ public class BaiLianService {
                     new QueryFileTool(botInstance, this, userId, sessionId),
                     new SearchHistoryTool(ltmRepo),
                     new RememberFactTool(ltmRepo),
-                    new SetBeliefTool(beliefRepo != null ? beliefRepo : new BeliefRepository(DatabaseConfig.getDataSource()), groupId, userId),
                     recallMemoryTool,
                     new ScheduleEventTool(ltmRepo),
                     new SendStatusTool(botInstance, groupId, userId),
@@ -742,7 +810,16 @@ public class BaiLianService {
                     new SearchDigestTool(),
                     new EvolutionHistoryTool(evoRepo),
                     new QueryImagesTool(new MessageRepository())
-            );
+            ));
+            // Phase 3: 工作记忆存在时，set_belief 退场，由 set_working_memory 接管
+            if (wm == null) {
+                availableTools.add(new SetBeliefTool(
+                        beliefRepo != null ? beliefRepo : new BeliefRepository(DatabaseConfig.getDataSource()),
+                        groupId, userId));
+            }
+            availableTools.add(new SetWorkingMemoryTool(
+                    new WorkingMemoryRepository(DatabaseConfig.getDataSource()),
+                    new ThreadRepository(DatabaseConfig.getDataSource()), groupId, BOT_QQ));
 
             List<Map<String, Object>> toolSpecs = availableTools.stream()
                     .map(Tool::getFunctionSpec)
@@ -1460,6 +1537,16 @@ public class BaiLianService {
     }
 
     /** 将时间戳转为相对时间标签，如 "今天 14:30"、"昨天 09:15" */
+    /** 从 SceneState 中找到 bot 参与的当前 Thread ID，否则返回最高权重 Thread ID。 */
+    private Long findCurrentThreadId(SceneState scene) {
+        if (scene == null || scene.isEmpty()) return null;
+        String botId = String.valueOf(BOT_QQ);
+        for (ConversationThread t : scene.activeThreads()) {
+            if (t.getParticipants().contains(botId)) return t.getId();
+        }
+        return scene.activeThreads().get(0).getId();
+    }
+
     private String formatRelativeTime(long timestamp) {
         java.time.LocalDateTime msgTime = java.time.LocalDateTime.ofInstant(
                 java.time.Instant.ofEpochMilli(timestamp), ZoneId.of("Asia/Shanghai"));

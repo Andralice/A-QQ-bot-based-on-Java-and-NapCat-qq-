@@ -1,7 +1,9 @@
 package com.start.service;
 
 import com.start.memory.BeliefRecall;
+import com.start.model.WorkingMemory;
 import com.start.repository.UserAliasRepository;
+import com.start.thread.SceneState;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +31,8 @@ public class PromptContext {
     boolean allowSilence;
     String pendingFilesHint;
     List<BeliefRecall> beliefRecalls;
+    SceneState sceneState;
+    WorkingMemory workingMemory;
     String promptPatch;
     List<Long> atUserIds;
     long botQq;
@@ -57,6 +61,8 @@ public class PromptContext {
     public PromptContext allowSilence(boolean v) { this.allowSilence = v; return this; }
     public PromptContext pendingFilesHint(String v) { this.pendingFilesHint = v; return this; }
     public PromptContext beliefRecalls(List<BeliefRecall> v) { this.beliefRecalls = v; return this; }
+    public PromptContext sceneState(SceneState v) { this.sceneState = v; return this; }
+    public PromptContext workingMemory(WorkingMemory v) { this.workingMemory = v; return this; }
     public PromptContext promptPatch(String v) { this.promptPatch = v; return this; }
     public PromptContext atUserIds(List<Long> v) { this.atUserIds = v; return this; }
     public PromptContext botQq(long v) { this.botQq = v; return this; }

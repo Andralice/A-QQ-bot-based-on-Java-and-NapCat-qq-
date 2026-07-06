@@ -1,6 +1,8 @@
 package com.start.service;
 
 import com.start.memory.BeliefRecall;
+import com.start.model.WorkingMemory;
+import com.start.thread.SceneState;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
@@ -141,7 +143,17 @@ public class PromptBuilder {
             sb.append(ctx.pendingFilesHint);
         }
 
-        // 会话认知（BeliefRecall 列表 → 叙事语言）
+        // 群聊场景（Thread 列表 → 群氛围叙事）— 最外层，群级上下文
+        if (ctx.sceneState != null && !ctx.sceneState.isEmpty()) {
+            sb.append(buildSceneNarrative(ctx.sceneState));
+        }
+
+        // 工作记忆（WorkingMemory → 当前 Thread 任务叙事）— 中间层，线程级
+        if (ctx.workingMemory != null) {
+            sb.append(buildWorkingMemoryNarrative(ctx.workingMemory));
+        }
+
+        // 会话认知（BeliefRecall 列表 → 叙事语言）— 最内层，个人级
         if (ctx.beliefRecalls != null && !ctx.beliefRecalls.isEmpty()) {
             sb.append(buildBeliefNarrative(ctx.beliefRecalls));
         }
@@ -170,6 +182,48 @@ public class PromptBuilder {
             }
         }
         sb.append("\n如果当前消息表明话题已转换或情绪已变化，以当前消息为准，不要强行维持旧认知。");
+        return sb.toString();
+    }
+
+    /** 将 SceneState 翻译为群聊场景叙事，帮助 LLM 感知群内的多线程话题结构。 */
+    private String buildSceneNarrative(SceneState scene) {
+        StringBuilder sb = new StringBuilder("\n\n【群聊场景】");
+        sb.append("\n活跃话题：").append(scene.atmosphere());
+        if (scene.totalActiveThreads() >= 3) {
+            sb.append("\n群气氛：热闹，多话题并行，注意不要串台");
+        } else if (scene.totalActiveThreads() == 2) {
+            sb.append("\n群气氛：两个话题并行，注意区分回复对象");
+        }
+        if (scene.focusedThreadTopic() != null) {
+            sb.append("\n当前最热话题：").append(scene.focusedThreadTopic());
+        }
+        sb.append("\n如果有多个话题在并行讨论，请只参与你感兴趣的那个，不用每条都跟。");
+        return sb.toString();
+    }
+
+    /** 将 WorkingMemory 翻译为当前任务叙事，帮助 LLM 记住"我在这个 Thread 里正在做什么"。 */
+    private String buildWorkingMemoryNarrative(WorkingMemory wm) {
+        StringBuilder sb = new StringBuilder("\n\n【当前任务】");
+        if (wm.getGoal() != null && !wm.getGoal().isBlank()) {
+            sb.append("\n• 目标：").append(wm.getGoal());
+        }
+        if (wm.getContextSummary() != null && !wm.getContextSummary().isBlank()) {
+            sb.append("\n• 已讨论：").append(wm.getContextSummary());
+        }
+        if (wm.getPendingAction() != null && !wm.getPendingAction().isBlank()) {
+            sb.append("\n• 等待：").append(wm.getPendingAction());
+        }
+        if (wm.getAttentionTarget() != null && !wm.getAttentionTarget().isBlank()) {
+            sb.append("\n• 关注：").append(wm.getAttentionTarget());
+        }
+        if (wm.getConstraints() != null && !wm.getConstraints().isBlank()) {
+            sb.append("\n• 注意：").append(wm.getConstraints());
+        }
+        if (wm.getUserEmotions() != null && !wm.getUserEmotions().isBlank()) {
+            // user_emotions 是 JSON 格式 {"qq号":"情绪",...}，直接展示给 LLM 理解
+            sb.append("\n• 用户情绪：").append(wm.getUserEmotions());
+        }
+        sb.append("\n如果当前消息表明任务已完成或话题已切换，可以调用 set_working_memory 更新状态。");
         return sb.toString();
     }
 }
