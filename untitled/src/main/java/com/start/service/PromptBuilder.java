@@ -1,8 +1,6 @@
 package com.start.service;
 
-import com.start.config.BotConfig;
-import com.start.memory.MemoryRecall;
-import com.start.memory.MemoryStatus;
+import com.start.memory.BeliefRecall;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
@@ -143,39 +141,35 @@ public class PromptBuilder {
             sb.append(ctx.pendingFilesHint);
         }
 
-        // 长期记忆召回（旧格式，保留兼容）
-        if (ctx.memoryRecallContext != null && !ctx.memoryRecallContext.isEmpty()) {
-            sb.append(ctx.memoryRecallContext);
-        }
-
-        // 长期记忆召回（新格式，MemoryRecall 列表 → 叙事语言）
-        if (ctx.memoryRecalls != null && !ctx.memoryRecalls.isEmpty()) {
-            sb.append(buildMemoryNarrative(ctx.memoryRecalls));
+        // 会话认知（BeliefRecall 列表 → 叙事语言）
+        if (ctx.beliefRecalls != null && !ctx.beliefRecalls.isEmpty()) {
+            sb.append(buildBeliefNarrative(ctx.beliefRecalls));
         }
 
         return sb.toString();
     }
 
-    /** 将 MemoryRecall 列表翻译为自然语言叙事 */
-    private String buildMemoryNarrative(List<MemoryRecall> recalls) {
-        StringBuilder sb = new StringBuilder("\n\n【你可能记得】");
-        for (MemoryRecall r : recalls) {
-            sb.append("\n• ");
-            if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) {
-                sb.append(r.stabilityHint());
+    /** 将 BeliefRecall 列表翻译为自然语言叙事，注入当前对话认知。 */
+    private String buildBeliefNarrative(List<BeliefRecall> recalls) {
+        StringBuilder sb = new StringBuilder("\n\n【当前对话状态】");
+        for (BeliefRecall r : recalls) {
+            if (r.topic() == null || r.topic().isBlank()) continue;
+            sb.append("\n• 当前话题：").append(r.topic());
+            if (r.userEmotion() != null && !r.userEmotion().isBlank()
+                    && !"未知".equals(r.userEmotion())) {
+                sb.append("，她").append(r.userEmotion());
             }
-            sb.append(r.content() != null ? r.content() : "");
-            if (r.recentlyConfirmed() && r.status() == MemoryStatus.CONFIRMED) {
-                sb.append("。（最近又提到过）");
-            } else if (r.ageText() != null && !r.ageText().isEmpty()) {
-                sb.append("（").append(r.ageText()).append("）");
-            } else if (r.status() == MemoryStatus.UNCERTAIN || r.status() == MemoryStatus.OUTDATED) {
-                sb.append("，不知道现在还是不是");
+            if (r.botIntent() != null && !r.botIntent().isBlank()) {
+                sb.append("，你刚才在").append(r.botIntent()).append("她");
+            }
+            if (r.unresolvedQuestion() != null && !r.unresolvedQuestion().isBlank()) {
+                sb.append("，还没解决的问题：").append(r.unresolvedQuestion());
+            }
+            if (r.ageMinutes() > 5) {
+                sb.append("（").append(r.ageMinutes()).append("分钟前）");
             }
         }
-        sb.append("\n\n这些记忆来自过去的聊天，可能已经过期或不够准确。");
-        sb.append("\n如果记忆与当前消息冲突，以当前消息为准。");
-        sb.append("\n不要强行坚持旧记忆——可以主动确认：\"我记得你之前喜欢奶茶，现在还喜欢吗？\"");
+        sb.append("\n如果当前消息表明话题已转换或情绪已变化，以当前消息为准，不要强行维持旧认知。");
         return sb.toString();
     }
 }

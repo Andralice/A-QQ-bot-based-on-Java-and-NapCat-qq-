@@ -5,10 +5,14 @@ import com.start.agent.Tool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.model.UserAffinity;
 import com.start.repository.UserAffinityRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
 public class UserAffinityTool implements Tool {
+
+    private static final Logger logger = LoggerFactory.getLogger(UserAffinityTool.class);
 
     private final UserAffinityRepository affinityRepo;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -73,8 +77,7 @@ public class UserAffinityTool implements Tool {
             }
 
         } catch (Exception e) {
-            // 记录日志（建议注入 Logger）
-            e.printStackTrace();
+            logger.error("查询好感度失败", e);
             return "查询好感度时发生内部错误。";
         }
     }

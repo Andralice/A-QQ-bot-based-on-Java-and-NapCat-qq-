@@ -1,6 +1,6 @@
 package com.start.service;
 
-import com.start.memory.MemoryRecall;
+import com.start.memory.BeliefRecall;
 import com.start.repository.UserAliasRepository;
 import java.util.List;
 import java.util.Map;
@@ -28,8 +28,7 @@ public class PromptContext {
     String metricsHint;
     boolean allowSilence;
     String pendingFilesHint;
-    String memoryRecallContext;
-    List<MemoryRecall> memoryRecalls;
+    List<BeliefRecall> beliefRecalls;
     String promptPatch;
     List<Long> atUserIds;
     long botQq;
@@ -57,8 +56,7 @@ public class PromptContext {
     public PromptContext metricsHint(String v) { this.metricsHint = v; return this; }
     public PromptContext allowSilence(boolean v) { this.allowSilence = v; return this; }
     public PromptContext pendingFilesHint(String v) { this.pendingFilesHint = v; return this; }
-    public PromptContext memoryRecallContext(String v) { this.memoryRecallContext = v; return this; }
-    public PromptContext memoryRecalls(List<MemoryRecall> v) { this.memoryRecalls = v; return this; }
+    public PromptContext beliefRecalls(List<BeliefRecall> v) { this.beliefRecalls = v; return this; }
     public PromptContext promptPatch(String v) { this.promptPatch = v; return this; }
     public PromptContext atUserIds(List<Long> v) { this.atUserIds = v; return this; }
     public PromptContext botQq(long v) { this.botQq = v; return this; }

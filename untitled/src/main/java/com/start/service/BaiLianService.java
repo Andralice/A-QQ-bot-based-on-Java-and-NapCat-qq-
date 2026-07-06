@@ -9,7 +9,7 @@ import com.start.Main;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.agent.social.LuckTool;
 import com.start.agent.MemoryTool;
-import com.start.memory.MemoryRecall;
+import com.start.memory.BeliefRecall;
 import com.start.agent.social.PokeTool;
 import com.start.agent.social.ProfessionPKTool;
 import com.start.agent.social.ProfessionTool;
@@ -17,6 +17,7 @@ import com.start.agent.social.RankTool;
 import com.start.agent.RecallMemoryTool;
 import com.start.agent.RememberFactTool;
 import com.start.agent.ReminderTool;
+import com.start.agent.SetBeliefTool;
 import com.start.agent.ScheduleEventTool;
 import com.start.agent.SearchHistoryTool;
 import com.start.agent.AwaitReplyTool;
@@ -54,6 +55,7 @@ import com.start.agent.DigestTool;
 import com.start.agent.SearchDigestTool;
 import com.start.agent.evo.EvolutionHistoryTool;
 import com.start.agent.QueryImagesTool;
+import com.start.repository.BeliefRepository;
 import com.start.repository.MessageRepository;
 import com.start.repository.RecurringTaskRepository;
 import com.start.service.EggGroupDataCenter;
@@ -148,12 +150,12 @@ public class BaiLianService {
     private ConversationMetrics metrics;
     private final PromptBuilder promptBuilder = new PromptBuilder();
     private final ProfileProvider profileProvider = new ProfileProvider();
-    private final MemoryService memoryService = new MemoryService();
     public void setMoodService(BotMoodService moodService) { this.moodService = moodService; }
     public BotMoodService getMoodService() { return moodService; }
     public void setLifeEngine(CandyBearLifeEngine e) { this.lifeEngine = e; }
     public void setBotInstance(Main bot) { this.botInstance = bot; }
     public void setConversationMetrics(ConversationMetrics m) { this.metrics = m; }
+    public ConversationMetrics getConversationMetrics() { return metrics; }
     public GameStateService getGameStateService() { return gameStateService; }
     public BotMemoryService getBotMemory() { return botMemory; }
 
@@ -206,7 +208,6 @@ public class BaiLianService {
         this.knowledgeService = Objects.requireNonNull(knowledgeService, "knowledgeService cannot be null");
         this.userAffinityRepo = Objects.requireNonNull(userAffinityRepo, "userAffinityRepo cannot be null");
         this.ttsService = Objects.requireNonNull(ttsService, "ttsService cannot be null");
-        memoryService.register(new LongTermMemoryProvider());
     }
     // === 上下文管理 ===
     private final Map<String, List<Message>> sessions = new ConcurrentHashMap<>(); // sessionId -> 消息历史
@@ -570,6 +571,27 @@ public class BaiLianService {
                 ctx.moodDescription(moodService.getMoodDescription(gk));
             }
 
+            // 会话认知加载（ConversationBelief → BeliefRecall）
+            final BeliefRepository beliefRepo = groupId != null
+                    ? new BeliefRepository(DatabaseConfig.getDataSource()) : null;
+            if (beliefRepo != null) {
+                try {
+                    List<BeliefRecall> beliefRecalls = beliefRepo.findActiveByGroupAndUser(groupId, userId)
+                            .stream()
+                            .map(b -> new BeliefRecall(
+                                    b.getTopic(), b.getUserEmotion(), b.getBotIntent(),
+                                    b.getUnresolvedQuestion(),
+                                    (int) java.time.Duration.between(b.getUpdatedAt(), java.time.Instant.now()).toMinutes(),
+                                    b.isActive()))
+                            .toList();
+                    if (!beliefRecalls.isEmpty()) {
+                        ctx.beliefRecalls(beliefRecalls);
+                    }
+                } catch (Exception e) {
+                    logger.debug("Belief loading skipped: {}", e.getMessage());
+                }
+            }
+
             String overridePrompt = runtimeConfig.get("system_prompt_override");
             String promptPatch = runtimeConfig.get("system_prompt_patch");
             ctx.promptPatch(promptPatch);
@@ -635,13 +657,9 @@ public class BaiLianService {
                 ctx.pendingFilesHint(fb.toString());
             }
 
-            // 主动记忆召回（通过 MemoryService 统一查询，输出结构化 MemoryRecall 列表）
+            // 关键词提取：供 recall_memory 工具的 autoKeywords 使用
+            // 不再自动注入记忆到 prompt —— 关键词匹配 ≠ 语义相关，LLM 自己判断什么时候该查
             List<String> hanlpKeywords = extractKeywords(userPrompt);
-            List<MemoryRecall> memoryRecalls = memoryService.queryForPrompt(userId, groupId, hanlpKeywords);
-            if (!memoryRecalls.isEmpty()) {
-                ctx.memoryRecalls(memoryRecalls);
-                logger.info("主动记忆召回: 关键词={}, 召回{}条", hanlpKeywords, memoryRecalls.size());
-            }
 
             logger.debug("完整请求:{}", systemPrompt);
 
@@ -697,6 +715,7 @@ public class BaiLianService {
                     new QueryFileTool(botInstance, this, userId, sessionId),
                     new SearchHistoryTool(ltmRepo),
                     new RememberFactTool(ltmRepo),
+                    new SetBeliefTool(beliefRepo != null ? beliefRepo : new BeliefRepository(DatabaseConfig.getDataSource()), groupId, userId),
                     recallMemoryTool,
                     new ScheduleEventTool(ltmRepo),
                     new SendStatusTool(botInstance, groupId, userId),
@@ -1551,6 +1570,19 @@ public class BaiLianService {
 
         history.offerLast(new PublicMessage(userId, nickname, message));
     }
+    /** 记录糖果熊自己的群发言到公开历史，使 LLM 能看到自己上一轮说了什么 */
+    public void recordBotOwnGroupMessage(String groupId, String message) {
+        if (groupId == null || message.trim().isEmpty()) return;
+
+        Deque<PublicMessage> history = publicGroupHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
+        long now = System.currentTimeMillis();
+        history.removeIf(msg -> now - msg.timestamp > 10 * 60_000);
+        if (history.size() >= 10) {
+            history.pollFirst();
+        }
+        history.offerLast(new PublicMessage(String.valueOf(BOT_QQ), "糖果熊", message));
+    }
+
     public Deque<PublicMessage> getPublicGroupHistory(String groupId) {
         return publicGroupHistory.get(groupId);
     }

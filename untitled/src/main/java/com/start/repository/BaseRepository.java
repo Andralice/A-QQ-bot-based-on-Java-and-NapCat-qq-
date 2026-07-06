@@ -1,6 +1,9 @@
 package com.start.repository;
 
 import com.start.config.DatabaseConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.sql.DataSource;
 import java.sql.*;
 import java.util.ArrayList;
@@ -12,6 +15,8 @@ import java.util.function.Function;
  * 数据库操作抽象类
  */
 public abstract class BaseRepository implements Repository {
+
+    protected final Logger logger = LoggerFactory.getLogger(getClass());
 
     @Override
     public DataSource getDataSource() {
@@ -26,12 +31,10 @@ public abstract class BaseRepository implements Repository {
             T result = operation.execute();
             return DatabaseResult.success(result);
         } catch (SQLException e) {
-            System.err.println("数据库操作失败: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("数据库操作失败", e);
             return DatabaseResult.failure(e.getMessage());
         } catch (Exception e) {
-            System.err.println("操作异常: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("操作异常", e);
             return DatabaseResult.failure("系统异常: " + e.getMessage());
         }
     }

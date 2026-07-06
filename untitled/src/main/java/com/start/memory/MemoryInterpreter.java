@@ -168,7 +168,7 @@ public class MemoryInterpreter {
 
         return switch (status) {
             case CONFIRMED -> daysSinceCreate > 90 ? "一直都" : "";
-            case ACTIVE -> daysSinceCreate <= 30 ? "最近" : "";
+            case ACTIVE -> daysSinceCreate <= 7 ? "最近" : "";
             case UNCERTAIN -> confidence < 0.5 ? "以前" : "好像";
             case OUTDATED -> confidence < 0.5 ? "很久以前" : "当时";
             case CONTRADICTED -> "曾经";

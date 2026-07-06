@@ -112,7 +112,7 @@ public class AIDatabaseService {
             }
 
         } catch (Exception e) {
-            System.err.println("记录AI回复失败: " + e.getMessage());
+            logger.error("记录AI回复失败", e);
         }
     }
 
@@ -124,7 +124,7 @@ public class AIDatabaseService {
                 threadRepo.createOrUpdateThread(threadKey, groupId, userId, lastBotReply);
             }
         } catch (Exception e) {
-            System.err.println("更新对话线程失败: " + e.getMessage());
+            logger.error("更新对话线程失败", e);
         }
     }
 
@@ -137,12 +137,10 @@ public class AIDatabaseService {
             if (result.isSuccess()) {
                 return result.getData();
             } else {
-                System.err.println("获取对话历史失败: " + result.getError());
-                logger.debug("获取对话历史失败: " + result.getError());
+                logger.warn("获取对话历史失败: {}", result.getError());
             }
         } catch (Exception e) {
-            System.err.println("获取对话历史异常: " + e.getMessage());
-            logger.debug("获取对话历史异常: " + e.getMessage());
+            logger.warn("获取对话历史异常", e);
         }
         return Collections.emptyList();
     }
@@ -157,8 +155,7 @@ public class AIDatabaseService {
                 return analyzeTopics(result.getData());
             }
         } catch (Exception e) {
-            System.err.println("获取用户话题偏好失败: " + e.getMessage());
-            logger.debug("获取用户话题偏好失败: " + e.getMessage());
+            logger.warn("获取用户话题偏好失败", e);
         }
         return Collections.emptyList();
     }
@@ -181,8 +178,7 @@ public class AIDatabaseService {
             messageRepo.saveActiveReplyLog(logData);
 
         } catch (Exception e) {
-            System.err.println("记录主动回复决策失败: " + e.getMessage());
-            logger.debug("记录主动回复决策失败: " + e.getMessage());
+            logger.warn("记录主动回复决策失败", e);
         }
     }
 

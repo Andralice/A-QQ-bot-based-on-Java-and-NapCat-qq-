@@ -48,6 +48,13 @@ public class Main extends WebSocketClient {
     /** JSON 序列化/反序列化工具，用于解析 OneBot 事件和构造 API 请求。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** 重连调度器，复用单线程避免每次断连泄漏线程池。 */
+    private final ScheduledExecutorService reconnectScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "Reconnect-Scheduler");
+        t.setDaemon(true);
+        return t;
+    });
+
     // ===== 白名单配置 =====
 
     /** 允许交互的群聊 ID 集合，由 BotConfig 提供。 */
@@ -319,8 +326,7 @@ public class Main extends WebSocketClient {
     @Override
     public void onClose(int code, String reason, boolean remote) {
         logger.warn("❌ 连接断开 (code={}, remote={}), 5秒后重连...", code, remote);
-        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-        scheduler.schedule(this::reconnect, 5, TimeUnit.SECONDS);
+        reconnectScheduler.schedule(this::reconnect, 5, TimeUnit.SECONDS);
     }
 
     /**
@@ -333,8 +339,7 @@ public class Main extends WebSocketClient {
             logger.info("✅ 重连成功");
         } catch (Exception e) {
             logger.error("⚠️ 重连失败，10秒后再次尝试...", e);
-            ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-            scheduler.schedule(this::reconnect, 10, TimeUnit.SECONDS);
+            reconnectScheduler.schedule(this::reconnect, 10, TimeUnit.SECONDS);
         }
     }
 
@@ -434,8 +439,10 @@ public class Main extends WebSocketClient {
             this.send(action.toString());
             logger.debug("📤 已发送群聊回复: {}", reply);
             if (this.baiLianService != null) {
+                String gid = String.valueOf(groupId);
                 this.baiLianService.recordGroupContext(
-                        String.valueOf(groupId), "candybear", "糖果熊", reply, "bot_reply");
+                        gid, "candybear", "糖果熊", reply, "bot_reply");
+                this.baiLianService.recordBotOwnGroupMessage(gid, reply);
                 this.baiLianService.getBotMemory().record(
                         String.valueOf(groupId), BotMemoryService.EntryType.SAID, null,
                         reply.length() > 100 ? reply.substring(0, 100) + "..." : reply);

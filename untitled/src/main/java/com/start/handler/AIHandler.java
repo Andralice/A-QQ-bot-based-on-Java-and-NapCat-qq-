@@ -12,10 +12,12 @@ import com.start.service.BotMoodService;
 import com.start.service.ConversationEvent;
 import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationManager;
+import com.start.service.ConversationMetrics;
 import com.start.service.ConversationState;
 import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
+import com.start.model.DecisionContext;
 import com.start.model.DecisionTrace;
 import com.start.runtime.ConversationRuntime;
 import com.start.runtime.conversation.ConversationRuntimeConfig;
@@ -190,7 +192,7 @@ public class AIHandler implements MessageHandler {
                 return;
             }
             long t0 = System.currentTimeMillis();
-            runGroupConversation(bot, groupId, gid, uid, nickname, ats, false, t0);
+            runGroupConversation(bot, groupId, gid, uid, nickname, ats, false, t0, ConversationEvent.MENTION);
             return;
         }
 
@@ -255,7 +257,7 @@ public class AIHandler implements MessageHandler {
         aiService.recordReaction(gid);
         boolean allowSilence = result.event().allowsSilence();
         long startMs = System.currentTimeMillis();
-        runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs);
+        runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs, result.event());
     }
 
     private void logDecision(String gid, String uid, String eventType, String decision,
@@ -273,7 +275,7 @@ public class AIHandler implements MessageHandler {
 
     /** 从 ConversationState 读取累积消息，生成回复并发送。在 executor 线程中执行。 */
     private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
-                                       List<Long> ats, boolean allowSilence, long startMs) {
+                                       List<Long> ats, boolean allowSilence, long startMs, ConversationEvent event) {
         groupExecutor.execute(gid, () -> {
             ConversationState state = conversationManager.get(gid, userId);
             if (state == null || !state.hasContent()) return;
@@ -282,6 +284,7 @@ public class AIHandler implements MessageHandler {
             int startMsgCount = state.getPendingMessages().size();
             state.incrementGeneration();
             GenerationResult genResult = null;
+            DecisionContext dc = null;
 
             // 图片 + 链接上下文在一次对话中不变，提到循环外避免重复下载/描述
             String replyContext = "";
@@ -319,12 +322,22 @@ public class AIHandler implements MessageHandler {
                 if (!imageDesc.isEmpty()) prompt = prompt + "\n\n" + imageDesc;
                 if (!linkContext.isEmpty()) prompt = prompt + "\n\n" + linkContext;
 
+                // 冻结决策上下文（Replay 用）
+                ConversationMetrics convMetrics = aiService.getConversationMetrics();
+                ConversationMetrics.Snapshot snap = convMetrics != null
+                        ? convMetrics.getSnapshot(gid) : ConversationMetrics.Snapshot.EMPTY;
+                dc = DecisionContext.of(
+                        event, state.getGeneration(), state.getMessageRevision(),
+                        allowSilence, snap.messagesLast30s(), snap.aiMessagesLast5m());
+
                 ConversationSession session = ConversationSession.of(gid, userId, nickname)
                         .userPrompt(prompt)
                         .atUserIds(ats)
                         .allowSilence(allowSilence)
                         .generation(state.getGeneration())
                         .revision(state.getMessageRevision())
+                        .event(event)
+                        .metricsSnapshot(snap)
                         .startMs(startMs)
                         .build();
 
@@ -340,7 +353,7 @@ public class AIHandler implements MessageHandler {
                 // 模型沉默 — 直接退出
                 if (genResult.isSilent()) {
                     long elapsed = System.currentTimeMillis() - startMs;
-                    runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed));
+                    runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed, dc));
                     conversationManager.remove(gid, userId);
                     return;
                 }
@@ -374,7 +387,7 @@ public class AIHandler implements MessageHandler {
                 aiService.commitGeneration("group_" + groupId + "_" + userId, userId,
                         state.getMergedText(), reply, gid);
                 if (moodService != null) moodService.onBotSpeak(gid);
-                runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed));
+                runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed, dc));
             } else {
                 bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
                 logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",

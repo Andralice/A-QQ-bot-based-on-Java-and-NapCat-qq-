@@ -1,5 +1,6 @@
 package com.start.runtime.trace;
 
+import com.start.model.DecisionContext;
 import com.start.model.DecisionTrace;
 import com.start.runtime.RuntimeEvent;
 import com.start.runtime.RuntimeListener;
@@ -17,16 +18,22 @@ public class DecisionTraceListener implements RuntimeListener {
             GenerationResult r = f.result();
             if (r == null) return;
 
+            DecisionContext dc = f.context();
+            String evt = dc != null ? dc.event().name() : "GENERATED";
+            long gen = dc != null ? dc.generation() : 0;
+            long rev = dc != null ? dc.revision() : 0;
+            boolean sil = dc != null && dc.allowSilence();
+
             String dec = r.isSilent() ? "SILENT" : r.isError() ? "ERROR" : "REPLY";
             String reason = r.isSilent() ? "model_no_reply" : "ok";
             int tools = r.toolCalls();
             int tokens = r.tokensUsed();
 
             DecisionTrace trace = new DecisionTrace(System.currentTimeMillis(), f.groupId(), f.userId(),
-                    "GENERATED", dec, reason, tools, tokens, f.latencyMs(), 0, 0, false);
+                    evt, dec, reason, tools, tokens, f.latencyMs(), gen, rev, sil);
             logger.info(trace.toLogLine());
 
-            WebDashboardListener.recordDecision(f.groupId(), f.userId(), "GENERATED", dec, reason,
+            WebDashboardListener.recordDecision(f.groupId(), f.userId(), evt, dec, reason,
                     tools, tokens, f.latencyMs());
         }
     }

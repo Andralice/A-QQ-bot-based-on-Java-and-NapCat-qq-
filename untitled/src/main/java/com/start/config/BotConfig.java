@@ -1,5 +1,6 @@
 package com.start.config;
 
+import com.start.util.EnvResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,8 +11,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Properties;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class BotConfig {
@@ -69,8 +68,6 @@ public class BotConfig {
     private static String webSearchUrl;
     private static String webSearchBackend;
 
-    private static final Pattern ENV_PATTERN = Pattern.compile("\\$\\{([^:}]+)(?::([^}]*))?\\}");
-
     static {
         try (InputStream is = BotConfig.class.getClassLoader().getResourceAsStream("application.properties")) {
             if (is == null) {
@@ -86,62 +83,62 @@ public class BotConfig {
             if (qqStr == null || qqStr.trim().isEmpty()) {
                 throw new RuntimeException("❌ 请配置 bot.qq");
             }
-            botQq = Long.parseLong(resolve(qqStr.trim()));
-            adminQq = Long.parseLong(resolve(props.getProperty("admin.qq", "0").trim()));
-            oneBotHttpBaseUrl = resolve(props.getProperty("onebot.http-base-url", "http://127.0.0.1:5700").trim());
-            wsBaseUrl = resolve(props.getProperty("ws.base.url", "ws://127.0.0.1:5700").trim());
-            wsUrl = resolve(props.getProperty("ws.url", wsBaseUrl).trim());
-            oneBotAccessToken = resolve(props.getProperty("onebot.access-token", "").trim());
+            botQq = Long.parseLong(EnvResolver.resolve(qqStr.trim()));
+            adminQq = Long.parseLong(EnvResolver.resolve(props.getProperty("admin.qq", "0").trim()));
+            oneBotHttpBaseUrl = EnvResolver.resolve(props.getProperty("onebot.http-base-url", "http://127.0.0.1:5700").trim());
+            wsBaseUrl = EnvResolver.resolve(props.getProperty("ws.base.url", "ws://127.0.0.1:5700").trim());
+            wsUrl = EnvResolver.resolve(props.getProperty("ws.url", wsBaseUrl).trim());
+            oneBotAccessToken = EnvResolver.resolve(props.getProperty("onebot.access-token", "").trim());
             botName = props.getProperty("bot.name", "糖果熊").trim();
-            String enabledStr = resolve(props.getProperty("private.whitelist.enabled", "false").trim());
+            String enabledStr = EnvResolver.resolve(props.getProperty("private.whitelist.enabled", "false").trim());
             privateWhitelistEnabled = Boolean.parseBoolean(enabledStr);
-            ALLOWED_GROUPS = parseLongSet(resolve(props.getProperty("allowed.groups", "")));
-            ALLOWED_PRIVATE_USERS = parseLongSet(resolve(props.getProperty("allowed.private.users", "")));
-            PRIVATE_BLACKLIST = parseLongSet(resolve(props.getProperty("private.blacklist", "")));
+            ALLOWED_GROUPS = parseLongSet(EnvResolver.resolve(props.getProperty("allowed.groups", "")));
+            ALLOWED_PRIVATE_USERS = parseLongSet(EnvResolver.resolve(props.getProperty("allowed.private.users", "")));
+            PRIVATE_BLACKLIST = parseLongSet(EnvResolver.resolve(props.getProperty("private.blacklist", "")));
 
-            baiLianApiKey = resolve(props.getProperty("bailian.api-key", resolve(props.getProperty("dashscope.api-key", ""))).trim());
-            baiLianBaseUrl = resolve(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
-            baiLianChatModel = resolve(props.getProperty("bailian.chat-model", "deepseek-v4-pro").trim());
-            baiLianTimeoutMs = parseInt(resolve(props.getProperty("bailian.timeout-ms", "90000")), 90000);
-            baiLianMaxRetries = parseInt(resolve(props.getProperty("bailian.max-retries", "2")), 2);
+            baiLianApiKey = EnvResolver.resolve(props.getProperty("bailian.api-key", EnvResolver.resolve(props.getProperty("dashscope.api-key", ""))).trim());
+            baiLianBaseUrl = EnvResolver.resolve(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
+            baiLianChatModel = EnvResolver.resolve(props.getProperty("bailian.chat-model", "deepseek-v4-pro").trim());
+            baiLianTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("bailian.timeout-ms", "90000")), 90000);
+            baiLianMaxRetries = parseInt(EnvResolver.resolve(props.getProperty("bailian.max-retries", "2")), 2);
 
-            agentApiKey = resolve(props.getProperty("agent.api-key", "").trim());
-            agentBaseUrl = resolve(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
-            agentModel = resolve(props.getProperty("agent.model", "deepseek-v4-pro").trim());
-            agentTimeoutMs = parseInt(resolve(props.getProperty("agent.timeout-ms", "90000")), 90000);
-            agentMaxRetries = parseInt(resolve(props.getProperty("agent.max-retries", "2")), 2);
+            agentApiKey = EnvResolver.resolve(props.getProperty("agent.api-key", "").trim());
+            agentBaseUrl = EnvResolver.resolve(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
+            agentModel = EnvResolver.resolve(props.getProperty("agent.model", "deepseek-v4-pro").trim());
+            agentTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("agent.timeout-ms", "90000")), 90000);
+            agentMaxRetries = parseInt(EnvResolver.resolve(props.getProperty("agent.max-retries", "2")), 2);
 
-            visionEnabled = Boolean.parseBoolean(resolve(props.getProperty("vision.enabled", "true")));
-            visionApiKey = resolve(props.getProperty("vision.api-key", baiLianApiKey).trim());
-            visionBaseUrl = resolve(props.getProperty("vision.base-url", baiLianBaseUrl).trim());
-            visionModel = resolve(props.getProperty("vision.model", "qwen-vl-max").trim());
-            visionTimeoutMs = parseInt(resolve(props.getProperty("vision.timeout-ms", "60000")), 60000);
+            visionEnabled = Boolean.parseBoolean(EnvResolver.resolve(props.getProperty("vision.enabled", "true")));
+            visionApiKey = EnvResolver.resolve(props.getProperty("vision.api-key", baiLianApiKey).trim());
+            visionBaseUrl = EnvResolver.resolve(props.getProperty("vision.base-url", baiLianBaseUrl).trim());
+            visionModel = EnvResolver.resolve(props.getProperty("vision.model", "qwen-vl-max").trim());
+            visionTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("vision.timeout-ms", "60000")), 60000);
 
-            ttsBaseUrl = resolve(props.getProperty("tts.base-url", "http://127.0.0.1:8765").trim());
-            ttsDefaultVoice = resolve(props.getProperty("tts.default-voice", "tangguoxiong").trim());
-            ttsAudioFormat = resolve(props.getProperty("tts.audio-format", "mp3").trim());
-            ttsTimeoutMs = parseInt(resolve(props.getProperty("tts.timeout-ms", "30000")), 30000);
-            ttsOutputDir = resolve(props.getProperty("tts.output-dir", "/opt/qq-bot/tts/output").trim());
-            ttsMaxRetries = parseInt(resolve(props.getProperty("tts.max-retries", "2")), 2);
+            ttsBaseUrl = EnvResolver.resolve(props.getProperty("tts.base-url", "http://127.0.0.1:8765").trim());
+            ttsDefaultVoice = EnvResolver.resolve(props.getProperty("tts.default-voice", "tangguoxiong").trim());
+            ttsAudioFormat = EnvResolver.resolve(props.getProperty("tts.audio-format", "mp3").trim());
+            ttsTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("tts.timeout-ms", "30000")), 30000);
+            ttsOutputDir = EnvResolver.resolve(props.getProperty("tts.output-dir", "/opt/qq-bot/tts/output").trim());
+            ttsMaxRetries = parseInt(EnvResolver.resolve(props.getProperty("tts.max-retries", "2")), 2);
 
-            merchantApiBaseUrl = resolve(props.getProperty("merchant.api.base-url", "https://wegame.shallow.ink"));
-            merchantApiKey = resolve(props.getProperty("merchant.api.key", ""));
-            merchantNotifyEnabled = Boolean.parseBoolean(resolve(props.getProperty("merchant.notify.enabled", "true")));
-            merchantNotifyGroups = parseLongSet(resolve(props.getProperty("merchant.notify.groups", "")));
+            merchantApiBaseUrl = EnvResolver.resolve(props.getProperty("merchant.api.base-url", "https://wegame.shallow.ink"));
+            merchantApiKey = EnvResolver.resolve(props.getProperty("merchant.api.key", ""));
+            merchantNotifyEnabled = Boolean.parseBoolean(EnvResolver.resolve(props.getProperty("merchant.notify.enabled", "true")));
+            merchantNotifyGroups = parseLongSet(EnvResolver.resolve(props.getProperty("merchant.notify.groups", "")));
             if (merchantNotifyGroups.isEmpty()) {
                 merchantNotifyGroups = ALLOWED_GROUPS;
             }
-            merchantNotifyQqs = parseLongSet(resolve(props.getProperty("merchant.notify.qqs", "")));
-            merchantHighValueItems = parseStringSet(resolve(props.getProperty("merchant.high-value-items", "国王球,炫彩精灵蛋,首领血脉,棱镜球")));
+            merchantNotifyQqs = parseLongSet(EnvResolver.resolve(props.getProperty("merchant.notify.qqs", "")));
+            merchantHighValueItems = parseStringSet(EnvResolver.resolve(props.getProperty("merchant.high-value-items", "国王球,炫彩精灵蛋,首领血脉,棱镜球")));
 
-            httpConnectTimeoutMs = parseInt(resolve(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
-            webSearchUrl = resolve(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
-            webSearchBackend = resolve(props.getProperty("web.search.backend", "bing"));
+            httpConnectTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
+            webSearchUrl = EnvResolver.resolve(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
+            webSearchBackend = EnvResolver.resolve(props.getProperty("web.search.backend", "bing"));
 
-            auditApiKey = resolve(props.getProperty("audit.api-key", "").trim());
-            auditBaseUrl = resolve(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions").trim());
-            auditModel = resolve(props.getProperty("audit.model", "claude-sonnet-4-6").trim());
-            auditTimeoutMs = parseInt(resolve(props.getProperty("audit.timeout-ms", "30000")), 30000);
+            auditApiKey = EnvResolver.resolve(props.getProperty("audit.api-key", "").trim());
+            auditBaseUrl = EnvResolver.resolve(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions").trim());
+            auditModel = EnvResolver.resolve(props.getProperty("audit.model", "claude-sonnet-4-6").trim());
+            auditTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("audit.timeout-ms", "30000")), 30000);
 
             logger.info("🤖 机器人 QQ: {}, 名字: {}", botQq, botName);
             logger.info("✅ WebSocket 地址: {}", wsUrl);
@@ -158,24 +155,6 @@ public class BotConfig {
             logger.error("❌ 加载配置失败", e);
             throw new RuntimeException("配置加载失败，请检查 application.properties", e);
         }
-    }
-
-    private static String resolve(String value) {
-        if (value == null) return null;
-        Matcher m = ENV_PATTERN.matcher(value.trim());
-        if (m.matches()) {
-            String envName = m.group(1);
-            String envValue = System.getenv(envName);
-            if (envValue != null && !envValue.isBlank()) {
-                return envValue;
-            }
-            String defaultValue = m.group(2);
-            if (defaultValue != null) {
-                return defaultValue;
-            }
-            logger.warn("环境变量 {} 未设置，将使用原始占位符", envName);
-        }
-        return value;
     }
 
     private static int parseInt(String value, int defaultValue) {

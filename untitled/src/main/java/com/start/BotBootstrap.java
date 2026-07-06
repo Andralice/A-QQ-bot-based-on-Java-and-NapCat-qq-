@@ -36,7 +36,6 @@ public final class BotBootstrap {
         // 启动时数据库连通性检查
         if (!DatabaseErrorHandler.isDatabaseAvailable()) {
             logger.error("数据库连接失败，请检查网络、SSH 隧道或数据库服务状态");
-            System.err.println("[FATAL] 数据库连接失败，请检查网络、SSH 隧道或数据库服务状态");
         }
 
         // WebSocket API 封装

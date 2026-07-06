@@ -1,5 +1,6 @@
 package com.start.config;
 
+import com.start.util.EnvResolver;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
@@ -10,30 +11,12 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Properties;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class DatabaseConfig {
 
     private static final Logger logger = LoggerFactory.getLogger(DatabaseConfig.class);
     private static HikariDataSource dataSource;
     private static boolean initialized = false;
-
-    private static final Pattern ENV_PATTERN = Pattern.compile("\\$\\{([^:}]+)(?::([^}]*))?\\}");
-
-    private static String resolve(String value) {
-        if (value == null) return null;
-        Matcher m = ENV_PATTERN.matcher(value.trim());
-        if (m.matches()) {
-            String envName = m.group(1);
-            String envValue = System.getenv(envName);
-            if (envValue != null && !envValue.isBlank()) return envValue;
-            String defaultValue = m.group(2);
-            if (defaultValue != null) return defaultValue;
-            logger.warn("环境变量 {} 未设置", envName);
-        }
-        return value;
-    }
 
     /**
      * 初始化数据库连接池（带重试机制）
@@ -60,7 +43,7 @@ public class DatabaseConfig {
                 // 配置HikariCP
                 HikariConfig config = new HikariConfig();
 
-                String dbUrl = resolve(props.getProperty("database.url",
+                String dbUrl = EnvResolver.resolve(props.getProperty("database.url",
                         "jdbc:mysql://localhost:3307/candybear_db" +
                                 "?useUnicode=true" +
                                 "&characterEncoding=utf8mb4" +
@@ -69,8 +52,8 @@ public class DatabaseConfig {
                                 "&serverTimezone=Asia/Shanghai"));
 
                 config.setJdbcUrl(dbUrl);
-                config.setUsername(resolve(props.getProperty("database.user", "candybear")));
-                config.setPassword(resolve(props.getProperty("database.password", "")));
+                config.setUsername(EnvResolver.resolve(props.getProperty("database.user", "candybear")));
+                config.setPassword(EnvResolver.resolve(props.getProperty("database.password", "")));
 
                 // 连接池配置
                 config.setMaximumPoolSize(10);
@@ -130,10 +113,10 @@ public class DatabaseConfig {
     private static boolean testBasicConnection() {
         try {
             Properties props = loadProperties();
-            String url = resolve(props.getProperty("database.url",
+            String url = EnvResolver.resolve(props.getProperty("database.url",
                     "jdbc:mysql://localhost:3307/candybear_db"));
-            String user = resolve(props.getProperty("database.user", "candybear"));
-            String password = resolve(props.getProperty("database.password", ""));
+            String user = EnvResolver.resolve(props.getProperty("database.user", "candybear"));
+            String password = EnvResolver.resolve(props.getProperty("database.password", ""));
 
             logger.info("测试连接: {}", url);
 

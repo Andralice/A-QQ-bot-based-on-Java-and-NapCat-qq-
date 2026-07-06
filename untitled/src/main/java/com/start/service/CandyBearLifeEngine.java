@@ -3,6 +3,8 @@ package com.start.service;
 import com.start.model.*;
 import com.start.repository.CandyBearLifeRepository;
 import com.start.repository.CandyBearScheduleRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.time.DayOfWeek;
@@ -31,6 +33,8 @@ import java.util.stream.Collectors;
  */
 public class CandyBearLifeEngine {
 
+    private static final Logger logger = LoggerFactory.getLogger(CandyBearLifeEngine.class);
+
     private final CandyBearLifeRepository repo;
     private final CandyBearScheduleRepository scheduleRepo;
     private final BaiLianService ai;
@@ -55,7 +59,7 @@ public class CandyBearLifeEngine {
         try {
             repo.initDefaultLifeState();
         } catch (Exception e) {
-            System.err.println("[LifeEngine] LifeState初始化失败: " + e.getMessage());
+            logger.error("[LifeEngine] LifeState初始化失败: " + e.getMessage());
         }
 
         // 1. 初始化 story arc（重试 3 次，失败也继续）
@@ -66,13 +70,13 @@ public class CandyBearLifeEngine {
                         generateNewArc(null);
                         break;
                     } catch (Exception e) {
-                        if (attempt == 2) System.err.println("[LifeEngine] arc 生成失败(重试3次): " + e.getMessage());
+                        if (attempt == 2) logger.error("[LifeEngine] arc 生成失败(重试3次): " + e.getMessage());
                         else Thread.sleep(2000);
                     }
                 }
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] arc 检查失败: " + e.getMessage());
+            logger.error("[LifeEngine] arc 检查失败: " + e.getMessage());
         }
 
         // 2. 补全最近 3 天日记（逐天生成，失败不阻塞后续）
@@ -84,7 +88,7 @@ public class CandyBearLifeEngine {
                     generateDailyJournal(d);
                 }
             } catch (Exception e) {
-                System.err.println("[LifeEngine] 日记生成失败 " + d + ": " + e.getMessage());
+                logger.error("[LifeEngine] 日记生成失败 " + d + ": " + e.getMessage());
             }
         }
 
@@ -95,7 +99,7 @@ public class CandyBearLifeEngine {
                 generateWeeklyDiary(thisMon);
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] 周记生成失败: " + e.getMessage());
+            logger.error("[LifeEngine] 周记生成失败: " + e.getMessage());
         }
 
         // 4. 生成本周日程（缺失时，重试3次）
@@ -107,13 +111,13 @@ public class CandyBearLifeEngine {
                         generateWeeklySchedule(thisMon);
                         break;
                     } catch (Exception e) {
-                        if (attempt == 2) System.err.println("[LifeEngine] 本周日程生成失败(重试3次): " + e.getMessage());
+                        if (attempt == 2) logger.error("[LifeEngine] 本周日程生成失败(重试3次): " + e.getMessage());
                         else Thread.sleep(2000);
                     }
                 }
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] 日程检查失败: " + e.getMessage());
+            logger.error("[LifeEngine] 日程检查失败: " + e.getMessage());
         }
 
         // 5. 预生成下周日程
@@ -125,13 +129,13 @@ public class CandyBearLifeEngine {
                         generateWeeklySchedule(nextMon);
                         break;
                     } catch (Exception e) {
-                        if (attempt == 2) System.err.println("[LifeEngine] 下周日程生成失败(重试3次): " + e.getMessage());
+                        if (attempt == 2) logger.error("[LifeEngine] 下周日程生成失败(重试3次): " + e.getMessage());
                         else Thread.sleep(2000);
                     }
                 }
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] 下周日程检查失败: " + e.getMessage());
+            logger.error("[LifeEngine] 下周日程检查失败: " + e.getMessage());
         }
     }
 
@@ -144,7 +148,7 @@ public class CandyBearLifeEngine {
                 generateDailyJournal(yesterday);
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] dailyTick 日记: " + e.getMessage());
+            logger.error("[LifeEngine] dailyTick 日记: " + e.getMessage());
         }
 
         // 周日生成周记 + 下周日程
@@ -161,7 +165,7 @@ public class CandyBearLifeEngine {
                 }
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] dailyTick 周记/日程: " + e.getMessage());
+            logger.error("[LifeEngine] dailyTick 周记/日程: " + e.getMessage());
         }
 
         // story arc 到期前 3 天生成新章节
@@ -171,7 +175,7 @@ public class CandyBearLifeEngine {
                 generateNewArc(arc.get());
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] dailyTick arc: " + e.getMessage());
+            logger.error("[LifeEngine] dailyTick arc: " + e.getMessage());
         }
     }
 
@@ -209,7 +213,7 @@ public class CandyBearLifeEngine {
 
         String response = ai.generateRaw(prompt);
         if (response == null || response.isBlank()) {
-            System.err.println("[LifeEngine] arc 生成失败: AI 返回为空");
+            logger.error("[LifeEngine] arc 生成失败: AI 返回为空");
             return;
         }
         CandyBearStoryArc arc = parseArcResponse(response);
@@ -263,7 +267,7 @@ public class CandyBearLifeEngine {
 
         String response = ai.generateRaw(prompt);
         if (response == null || response.isBlank()) {
-            System.err.println("[LifeEngine] 周记生成失败: AI 返回为空");
+            logger.error("[LifeEngine] 周记生成失败: AI 返回为空");
             return;
         }
         CandyBearWeeklyDiary diary = parseWeekResponse(response, weekStart, weekEnd);
@@ -323,7 +327,7 @@ public class CandyBearLifeEngine {
 
         String response = ai.generateRaw(prompt);
         if (response == null || response.isBlank()) {
-            System.err.println("[LifeEngine] 日记生成失败 " + date + ": AI 返回为空");
+            logger.error("[LifeEngine] 日记生成失败 " + date + ": AI 返回为空");
             return;
         }
         CandyBearDailyJournal journal = parseJournalResponse(response, date);
@@ -475,7 +479,7 @@ public class CandyBearLifeEngine {
                 return sb.toString();
             }
         } catch (Exception e) {
-            System.err.println("[LifeEngine] LifeState读取失败，使用默认: " + e.getMessage());
+            logger.error("[LifeEngine] LifeState读取失败，使用默认: " + e.getMessage());
         }
         return HARDCODED_LIFE_STATE;
     }
@@ -544,7 +548,7 @@ public class CandyBearLifeEngine {
 
             repo.upsertLifeState(state);
         } catch (Exception e) {
-            System.err.println("[LifeEngine] LifeState更新失败: " + e.getMessage());
+            logger.error("[LifeEngine] LifeState更新失败: " + e.getMessage());
         }
     }
 
@@ -585,7 +589,7 @@ public class CandyBearLifeEngine {
 
         String response = ai.generateRaw(prompt);
         if (response == null || response.isBlank()) {
-            System.err.println("[LifeEngine] 日程生成失败: AI 返回为空");
+            logger.error("[LifeEngine] 日程生成失败: AI 返回为空");
             return;
         }
 
@@ -596,7 +600,7 @@ public class CandyBearLifeEngine {
             try {
                 scheduleRepo.insert(s);
             } catch (SQLException e) {
-                System.err.println("[LifeEngine] 日程插入失败 " + s.getScheduleDate() + " " + s.getTimeSlot() + ": " + e.getMessage());
+                logger.error("[LifeEngine] 日程插入失败 " + s.getScheduleDate() + " " + s.getTimeSlot() + ": " + e.getMessage());
             }
         }
     }
@@ -625,7 +629,7 @@ public class CandyBearLifeEngine {
                     list.add(s);
                 }
             } catch (Exception e) {
-                System.err.println("[LifeEngine] 日程行解析跳过: " + line + " -> " + e.getMessage());
+                logger.error("[LifeEngine] 日程行解析跳过: " + line + " -> " + e.getMessage());
             }
         }
         return list;

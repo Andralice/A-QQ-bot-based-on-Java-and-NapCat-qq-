@@ -185,13 +185,13 @@ public class UserPortraitService {
                 long lastId = (Long) candidate.get("lastId");
                 try {
                     processUser(userId, groupId, lastId);
-                    System.out.println("✅ 更新画像: " + userId + " @ " + groupId);
+                    logger.info("更新画像: {} @ {}", userId, groupId);
                 } catch (Exception e) {
-                    System.err.println("❌ 处理失败: " + userId + " @ " + groupId + " - " + e.getMessage());
+                    logger.error("处理失败: {} @ {}", userId, groupId, e);
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            logger.error("更新画像任务异常", e);
         }
     }
 }

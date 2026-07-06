@@ -57,8 +57,7 @@ public class CpResultTemplate implements ImageTemplate<CpResultData> {
                 g.drawImage(backgroundImage, 0, 0, null);
             }
         } catch (IOException e) {
-            System.err.println("Failed to load background image: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("加载背景图片失败", e);
         }
 
         // 抗锯齿设置
