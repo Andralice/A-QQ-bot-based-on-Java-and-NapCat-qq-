@@ -23,6 +23,8 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 自动异常监控服务 —— 定时扫描日志 ERROR，用便宜 API 做分类，
@@ -43,6 +45,15 @@ public class ErrorMonitorService {
     private static final int AUDIT_MAX_RETRIES = 3;
     private static final int AUDIT_RETRY_DELAY_MS = 2000;
     private static final int ALERT_CONSECUTIVE_THRESHOLD = 3;
+
+    // logback.xml pattern: %d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n
+    // 严格要求两个 pattern 保持一致，否则判定会失效。
+    // 三个捕获组：1=时间戳 2=线程名 3=日志级别
+    private static final Pattern LOG_HEADER_PATTERN = Pattern.compile(
+        "^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}) \\[([^\\]]+)\\] (TRACE|DEBUG|INFO|WARN|ERROR|FATAL) "
+    );
+    // 自身线程产生的日志永远不算错误（自激）
+    private static final String SELF_THREAD = "ErrorMonitor-Thread";
 
     private final BaiLianService aiService;
     private Main botInstance;
@@ -131,16 +142,59 @@ public class ErrorMonitorService {
     }
 
     private List<String> readNewErrors(Path logFile, long fileSize) throws IOException {
-        List<String> errors = new ArrayList<>();
+        List<String> rawLines = readNewRawLines(logFile, fileSize);
+        List<String> blocks = parseErrorBlocks(rawLines);
+        if (blocks.size() > MAX_ERRORS_PER_SCAN) {
+            return new ArrayList<>(blocks.subList(0, MAX_ERRORS_PER_SCAN));
+        }
+        return blocks;
+    }
+
+    private List<String> readNewRawLines(Path logFile, long fileSize) throws IOException {
+        List<String> lines = new ArrayList<>();
         try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
             raf.seek(lastFilePos);
             String line;
-            while ((line = raf.readLine()) != null && errors.size() < MAX_ERRORS_PER_SCAN) {
-                if (line.contains("ERROR") || line.contains("Exception") || line.contains("FATAL")) {
-                    errors.add(new String(line.getBytes("ISO-8859-1"), "UTF-8"));
-                }
+            while ((line = raf.readLine()) != null) {
+                lines.add(new String(line.getBytes("ISO-8859-1"), "UTF-8"));
             }
             lastFilePos = raf.getFilePointer();
+        }
+        return lines;
+    }
+
+    /**
+     * 从原始日志行中提取"错误块"：以 ERROR/FATAL 级别日志行开头，紧随其后的
+     * 堆栈行（无时间戳前缀）一并归入同一块。判定严格基于 logback 格式前缀，
+     * 任何仅因业务文本里出现 "Exception" / "ERROR" / "FATAL" 字样而触发的
+     * 误判（例如线程名 ErrorMonitor-Thread、变量名包含 Exception 等）均不会
+     * 再命中。自身线程 ErrorMonitor-Thread 的输出永远忽略，避免自激。
+     */
+    static List<String> parseErrorBlocks(List<String> rawLines) {
+        List<String> errors = new ArrayList<>();
+        List<String> currentBlock = null;
+        for (String line : rawLines) {
+            Matcher m = LOG_HEADER_PATTERN.matcher(line);
+            if (m.find()) {
+                // 新的一行"日志行"——先 flush 上一块
+                if (currentBlock != null) {
+                    errors.add(String.join("\n", currentBlock));
+                    currentBlock = null;
+                }
+                String thread = m.group(2);
+                String level = m.group(3);
+                if (("ERROR".equals(level) || "FATAL".equals(level))
+                    && !SELF_THREAD.equals(thread)) {
+                    currentBlock = new ArrayList<>();
+                    currentBlock.add(line);
+                }
+            } else if (currentBlock != null) {
+                // 堆栈行/非日志行——归到当前错误块
+                currentBlock.add(line);
+            }
+        }
+        if (currentBlock != null) {
+            errors.add(String.join("\n", currentBlock));
         }
         return errors;
     }
@@ -160,20 +214,18 @@ public class ErrorMonitorService {
         return fresh;
     }
 
-    private String errorSignature(String line) {
-        String sig;
-        int excIdx = line.indexOf("Exception");
-        if (excIdx > 0) {
-            int start = Math.max(0, excIdx - 30);
-            sig = line.substring(start, Math.min(line.length(), excIdx + 20));
-        } else if (line.contains("ERROR")) {
-            int errIdx = line.indexOf("ERROR");
-            int start = Math.max(0, errIdx - 10);
-            sig = line.substring(start, Math.min(line.length(), errIdx + 50));
-        } else {
-            sig = line.substring(0, Math.min(line.length(), 80));
+    private String errorSignature(String errorBlock) {
+        // errorBlock 形如 "yyyy-MM-dd ... [Thread] ERROR logger - message\n\tat xxx\n\tat yyy"
+        // 用"logger + message"作去重键，剥离时间戳/线程名/堆栈行号，相同根因的消息稳定匹配
+        Matcher m = LOG_HEADER_PATTERN.matcher(errorBlock);
+        if (m.find()) {
+            String body = errorBlock.substring(m.end());
+            int newline = body.indexOf('\n');
+            if (newline > 0) body = body.substring(0, newline);
+            return body.replaceAll("\\d", "0").trim();
         }
-        return sig.trim().replaceAll("\\d", "0");
+        return errorBlock.substring(0, Math.min(errorBlock.length(), 80))
+            .replaceAll("\\d", "0").trim();
     }
 
     // ==================== 审计 API 调用（便宜模型） ====================
@@ -232,8 +284,17 @@ public class ErrorMonitorService {
                 }
 
                 JsonNode json = MAPPER.readTree(resp.body());
-                String content = json.path("choices").get(0).path("message").path("content").asText("");
+                String content = extractAuditConclusion(json);
                 logger.info("📊 审计API: 结论={}", content.substring(0, Math.min(content.length(), 100)));
+
+                // 旧 bug：审计结论为空时 needsRepair("") 直接返回 false → ERROR 被静默跳过
+                // 修复：空结论发告警归儿，由人工判断，不要静默吞掉
+                if (content == null || content.trim().isEmpty()) {
+                    logger.warn("⚠️ 审计 API 未产出结论（content + reasoning_content 都空）");
+                    sendAlert("[审计API异常] 调用成功但未产出结论（reasoning 模型可能异常或平台故障），"
+                            + "已发现 " + errors.size() + " 条 ERROR 未分类，请人工检查。");
+                    return;
+                }
 
                 if (needsRepair(content)) {
                     logger.warn("🔧 审计 API 判定需要修复，触发主 AI");
@@ -258,22 +319,69 @@ public class ErrorMonitorService {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", BotConfig.getAuditModel());
         ArrayNode msgs = body.putArray("messages");
+        // system prompt：给 reasoning 模型明确格式约束，避免 content 为空
+        // 旧 bug：只发 user message，reasoning 模型把结论全放进 reasoning_content，content 永远空
+        ObjectNode sysMsg = msgs.addObject();
+        sysMsg.put("role", "system");
+        sysMsg.put("content", "你是日志分析器。只输出最终结论，不要分析过程。\n"
+                + "严格按格式回复（中文一行）：[严重程度] 一句话结论。需要修复：是/否。原因：...\n"
+                + "严重程度只能是：严重 / 一般 / 可忽略。");
         ObjectNode msg = msgs.addObject();
         msg.put("role", "user");
         msg.put("content", userMessage);
-        body.put("max_tokens", 300);
+        // reasoning 模型（MiniMax-M2.7 等）的 reasoning_content 经常消耗 1000+ tokens
+        // 旧 max_tokens=2000 经常截断 final answer，提到 4000 给 final answer 留够空间
+        body.put("max_tokens", 4000);
         body.put("temperature", 0.1);
         return body.toString();
     }
 
-    private boolean needsRepair(String auditConclusion) {
+    /**
+     * 从审计 API 响应 JSON 中提取结论文本。
+     * 优先用 OpenAI 标准字段 content；为空时 fallback 到 reasoning_content
+     * （mytokenland 等聚合平台使用 MiniMax-M2.7 reasoning 模型，输出走 reasoning_content）。
+     * 两端都空时返回空串——调用方按"无需修复"处理。
+     */
+    static String extractAuditConclusion(JsonNode json) {
+        JsonNode msg = json.path("choices");
+        if (!msg.isArray() || msg.isEmpty()) return "";
+        JsonNode message = msg.get(0).path("message");
+        String content = message.path("content").asText("");
+        if (content != null && !content.isEmpty()) return content;
+        // fallback: reasoning_content（reasoning 模型输出位置）
+        String reasoning = message.path("reasoning_content").asText("");
+        return reasoning == null ? "" : reasoning;
+    }
+
+    /**
+     * 判定审计结论是否需要触发主 AI 修复。
+     *
+     * 修复前 bug：把"严重程度"标签当成"是否需要修"的开关，导致
+     * [一般] + 需要修复：是 永远被忽略——审计说"要修"被代码判"无需修"。
+     *
+     * 修复后：以"需要修复：是/否"为权威判定，严重程度只在无明确指令时兜底。
+     *   - 明确"需要修复：否/不需要/无需修复" → false
+     *   - 明确"需要修复：是" → true（不管严重程度）
+     *   - 无明确指令 + [严重] → true（保守：严重则默认要修）
+     *   - 其他情况（含 [一般]/[可忽略]） → false
+     */
+    static boolean needsRepair(String auditConclusion) {
+        if (auditConclusion == null || auditConclusion.isEmpty()) return false;
         String lower = auditConclusion.toLowerCase();
+
+        // 1. 明确"不要修"系列——优先级最高
         if (lower.contains("需要修复：否") || lower.contains("需要修复:否")) return false;
         if (lower.contains("需要修复：不需要") || lower.contains("需要修复:不需要")) return false;
         if (lower.contains("无需修复") || lower.contains("不需要修复")) return false;
-        if (lower.contains("[一般]") || lower.contains("[可忽略]")) return false;
+
+        // 2. 明确"要修"——不管严重程度
         if (lower.contains("需要修复：是") || lower.contains("需要修复:是")) return true;
-        if (lower.contains("[严重]") && !lower.contains("需要修复：否")) return true;
+        if (lower.contains("需要立即修复") || lower.contains("需立即修复")) return true;
+
+        // 3. 严重程度兜底：只有 [严重] 才默认要修
+        if (lower.contains("[严重]")) return true;
+
+        // 4. 保守默认：不修（[一般]/[可忽略] 或解析失败都走这里）
         return false;
     }
 
@@ -285,35 +393,76 @@ public class ErrorMonitorService {
             long adminQQ = BotConfig.getAdminQq();
             String sessionId = "auto_fix_" + System.currentTimeMillis();
 
+            // prompt 关键改动：旧版依赖 LLM 调 send_private_msg 自报，经常发空话
+            // 新版：主 AI 只输出结构化 JSON 报告到 reply 字段，Java 用 AuditReportBuilder 翻译后转发
             StringBuilder prompt = new StringBuilder();
             prompt.append("【自动巡检 - ").append(time).append("】\n\n");
-            prompt.append("日志监控发现异常，审计 API 判定：").append(auditSummary).append("\n\n");
-            prompt.append("原始错误（已去重）：\n```\n");
+            prompt.append("审计 API 初步判定：").append(auditSummary).append("\n\n");
+            prompt.append("原始错误（已去重，最多 5 条）：\n```\n");
             for (int i = 0; i < Math.min(errors.size(), 5); i++) {
                 String e = errors.get(i);
                 prompt.append(e.length() > 300 ? e.substring(0, 300) + "..." : e).append("\n");
             }
             prompt.append("```\n\n");
-            prompt.append("请执行：\n");
-            prompt.append("1. audit_logs action=errors 看详细堆栈\n");
-            prompt.append("2. 定位问题代码 → read_code（只读，不要改）\n");
-            prompt.append("3. 分析完后用 send_private_msg 告诉归儿：\n");
-            prompt.append("   - 异常是什么、严重程度\n");
-            prompt.append("   - 问题出在哪个文件的哪个方法\n");
-            prompt.append("   - 建议怎么修（给出具体的 old_snippet → new_snippet）\n");
-            prompt.append("   - 如果简单的话也说明一下需要几行改动\n");
-            prompt.append("⚠️ 不要调用 self_evolve，只分析+报告。归儿会自己决定要不要修。\n");
-            prompt.append("如果审计判断有误或无需修，也说一声。");
+            prompt.append("请按以下步骤输出排查报告：\n");
+            prompt.append("1. 调 investigate 工具传入 query 让子模型深入排查（例: '查最近20条ERROR日志并分析根因'）\n");
+            prompt.append("2. 如 investigate 返回 '未产出结论'，自己从上面原始错误分析\n");
+            prompt.append("3. 最后只输出**一个 JSON 对象**到 reply（用 ```json 包裹），不要任何其他文字：\n");
+            prompt.append("```json\n");
+            prompt.append("{\n");
+            prompt.append("  \"severity\": \"严重/一般/可忽略\",\n");
+            prompt.append("  \"summary\": \"一句话结论（必填）\",\n");
+            prompt.append("  \"location\": \"出问题的文件:方法（可空）\",\n");
+            prompt.append("  \"exceptionType\": \"异常类型（可空）\",\n");
+            prompt.append("  \"suggestions\": [\"建议1\", \"建议2\"],\n");
+            prompt.append("  \"needsFix\": true或false\n");
+            prompt.append("}\n");
+            prompt.append("```\n");
+            prompt.append("⚠️ 行为约束：\n");
+            prompt.append("- 只输出 JSON 对象，不要解释/寒暄/分析过程\n");
+            prompt.append("- 不要调 send_private_msg（系统会自己转发给归儿）\n");
+            prompt.append("- 不要调 self_evolve（归儿会自己决定要不要修）\n");
+            prompt.append("- 如果排查不出明确问题，severity=可忽略，summary=无法定位根因，请人工查看");
 
-            logger.info("🤖 触发主 AI 修复: sessionId={}", sessionId);
+            logger.info("🤖 触发主 AI 排查: sessionId={}", sessionId);
             String result = aiService.generate(sessionId, String.valueOf(adminQQ), prompt.toString(), null, "系统巡检");
 
-            if (result != null && !result.trim().isEmpty() && botInstance != null) {
-                String shortResult = result.length() > 300 ? result.substring(0, 300) + "..." : result;
-                botInstance.sendPrivateReply(adminQQ, "[异常报告]\n" + shortResult);
+            if (botInstance == null) {
+                logger.warn("botInstance 未设置，无法转发报告");
+                return;
             }
+
+            // 解析主 AI 输出的 JSON 报告，翻译后转发
+            // 旧 bug：直接把 LLM reply 截断 300 字符 → 残缺报告
+            // 修复：先尝试解析 JSON 结构化报告，失败兜底发原始文本（不截断）
+            com.start.model.AuditReport report = AuditReportBuilder.parse(result);
+            String message;
+            if (report != null) {
+                message = AuditReportBuilder.render(report);
+                logger.info("📋 主 AI 输出已解析为结构化报告，severity={}, needsFix={}",
+                        report.getSeverity(), report.isNeedsFix());
+            } else if (result != null && !result.trim().isEmpty()) {
+                // JSON 解析失败——主 AI 没按格式输出
+                // 兜底：发原始文本，但保留全量（QQ 私聊支持长消息），加上提示头
+                logger.warn("⚠️ 主 AI 输出未含 JSON 结构，回退到原始文本转发（{} chars）", result.length());
+                message = "【巡检报告（主 AI 未按结构化输出）】\n" + result.trim();
+            } else {
+                // 主 AI 完全没输出（沉默/错误）——给归儿一个明确反馈
+                logger.warn("⚠️ 主 AI 未产出任何回复");
+                message = "【巡检报告（主 AI 未回复）】\n"
+                        + "审计 API 判定需要修复，但主 AI 排查时未产出回复。\n"
+                        + "审计结论：" + auditSummary + "\n"
+                        + "请人工检查。";
+            }
+
+            // 安全截断：5000 字符（NapCat 单消息上限保护），不再 300 截断
+            final int MAX_REPORT_CHARS = 5000;
+            if (message.length() > MAX_REPORT_CHARS) {
+                message = message.substring(0, MAX_REPORT_CHARS) + "\n...[报告过长已截断]";
+            }
+            botInstance.sendPrivateReply(adminQQ, message);
         } catch (Exception e) {
-            logger.error("主 AI 修复触发失败", e);
+            logger.error("主 AI 排查触发失败", e);
         }
     }
 
@@ -355,7 +504,9 @@ public class ErrorMonitorService {
     // ==================== 工具方法 ====================
 
     private Path findLogFile() {
+        // stdout 重定向目标优先（nohup / 自定义部署），其次兼容老路径
         String[] candidates = {
+            "/opt/qq-bot/qq-bot.stdout.log",
             "/opt/qq-bot/qq-bot.log",
             "/opt/qq-bot/logs/app.log",
             "qq-bot.log",
