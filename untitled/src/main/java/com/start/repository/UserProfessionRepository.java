@@ -6,6 +6,8 @@ import com.start.model.UserProfession;
 import javax.sql.DataSource;
 import java.time.LocalDate;
 import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
 
 public class UserProfessionRepository implements Repository {
 
@@ -23,6 +25,7 @@ public class UserProfessionRepository implements Repository {
         UserProfession existing = findByUser(userId, groupId);
         if (existing != null) return existing;
 
+        // 新号首次建档：脉系按 userId 绑定（稳定），后续每日由 drawForUser 重抽
         UserProfession fresh = new UserProfession();
         fresh.setUserId(userId);
         fresh.setGroupId(groupId);
@@ -48,6 +51,18 @@ public class UserProfessionRepository implements Repository {
             }
         }
         return null;
+    }
+
+    /** 遍历所有职业记录（启动后全员重抽用） */
+    public List<UserProfession> findAll() throws SQLException {
+        String sql = "SELECT * FROM user_professions";
+        List<UserProfession> list = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) list.add(mapRow(rs));
+        }
+        return list;
     }
 
     /** 插入新用户职业记录 */
@@ -236,9 +251,17 @@ public class UserProfessionRepository implements Repository {
             {100, 300}, {300, 800}, {800, 2000}, {2000, 5000}, {5000, 10000}
         };
 
-        /** 根据用户ID随机分配脉系（确定性算法） */
+        /** 根据用户ID确定性地分配脉系（仅新号首次建档用，保证新用户有稳定初始 path） */
         public static String randomPath(long userId) {
             return PATHS[(int) (Math.abs(userId * 0x9E3779B9L) % PATHS.length)];
+        }
+
+        /**
+         * 纯随机分配脉系（每日重抽用）。
+         * 用传入的 Random 保证同一天内多次重抽结果可复现（重抽时也走同一随机源）。
+         */
+        public static String randomPath(java.util.Random rng) {
+            return PATHS[rng.nextInt(PATHS.length)];
         }
 
         /** 获取指定脉系和阶位的职业名称 */

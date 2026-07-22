@@ -335,7 +335,7 @@ public class Main extends WebSocketClient {
     public void reconnect() {
         try {
             logger.info("🔄 尝试重连...");
-            this.connect();
+            this.reconnect();
             logger.info("✅ 重连成功");
         } catch (Exception e) {
             logger.error("⚠️ 重连失败，10秒后再次尝试...", e);

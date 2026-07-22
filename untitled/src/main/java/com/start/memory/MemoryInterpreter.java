@@ -88,6 +88,7 @@ public class MemoryInterpreter {
             case OTHERS_SAID -> 0.45;
             case GUIER_CONFIRMED -> 0.95;
             case KNOWLEDGE_BASE -> 0.7;
+            case AUTO_FORMED -> 0.4;
         };
 
         LocalDateTime lastSignal = m.getLastConfirmedAt() != null ? m.getLastConfirmedAt() : m.getCreatedAt();

@@ -21,7 +21,7 @@ public class LongTermMemoryRepository implements Repository {
 
     /** 插入一条新记忆（含可选的定时触发时间） */
     public void insert(LongTermMemory m) throws SQLException {
-        String sql = "INSERT INTO long_term_memories (user_id, group_id, source_message_id, content, memory_type, keywords, importance, trigger_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        String sql = "INSERT INTO long_term_memories (user_id, group_id, source_message_id, content, memory_type, keywords, importance, trigger_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, m.getUserId());
@@ -34,6 +34,8 @@ public class LongTermMemoryRepository implements Repository {
             ps.setInt(7, m.getImportance());
             if (m.getTriggerAt() != null) ps.setTimestamp(8, Timestamp.valueOf(m.getTriggerAt()));
             else ps.setNull(8, Types.TIMESTAMP);
+            if (m.getExpiresAt() != null) ps.setTimestamp(9, Timestamp.valueOf(m.getExpiresAt()));
+            else ps.setNull(9, Types.TIMESTAMP);
             ps.executeUpdate();
             ResultSet keys = ps.getGeneratedKeys();
             if (keys.next()) m.setId(keys.getLong(1));
@@ -51,7 +53,8 @@ public class LongTermMemoryRepository implements Repository {
         StringBuilder sql = new StringBuilder(
                 "SELECT * FROM long_term_memories WHERE user_id = ? AND group_id ");
         boolean hasGroup = groupId != null && !groupId.isBlank();
-        sql.append(hasGroup ? "= ? AND triggered = FALSE " : "IS NULL AND triggered = FALSE ");
+        sql.append(hasGroup ? "= ? AND triggered = FALSE AND (expires_at IS NULL OR expires_at > NOW()) "
+                         : "IS NULL AND triggered = FALSE AND (expires_at IS NULL OR expires_at > NOW()) ");
         List<String> params = new ArrayList<>();
         params.add(userId);
         if (hasGroup) params.add(groupId);
@@ -100,7 +103,8 @@ public class LongTermMemoryRepository implements Repository {
         StringBuilder sql = new StringBuilder(
                 "SELECT * FROM long_term_memories WHERE group_id ");
         boolean hasGroup = groupId != null && !groupId.isBlank();
-        sql.append(hasGroup ? "= ? AND triggered = FALSE " : "IS NULL AND triggered = FALSE ");
+        sql.append(hasGroup ? "= ? AND triggered = FALSE AND (expires_at IS NULL OR expires_at > NOW()) "
+                         : "IS NULL AND triggered = FALSE AND (expires_at IS NULL OR expires_at > NOW()) ");
         List<String> params = new ArrayList<>();
         if (hasGroup) params.add(groupId);
 
@@ -156,7 +160,8 @@ public class LongTermMemoryRepository implements Repository {
         StringBuilder sql = new StringBuilder(
                 "SELECT * FROM long_term_memories WHERE user_id = ? AND group_id ");
         boolean hasGroup = groupId != null && !groupId.isBlank();
-        sql.append(hasGroup ? "= ? AND triggered = FALSE " : "IS NULL AND triggered = FALSE ");
+        sql.append(hasGroup ? "= ? AND triggered = FALSE AND (expires_at IS NULL OR expires_at > NOW()) "
+                         : "IS NULL AND triggered = FALSE AND (expires_at IS NULL OR expires_at > NOW()) ");
         sql.append("ORDER BY created_at DESC LIMIT ?");
 
         try (Connection conn = dataSource.getConnection();
@@ -209,6 +214,7 @@ public class LongTermMemoryRepository implements Repository {
                 "SELECT * FROM long_term_memories WHERE user_id = ? AND (content LIKE ? OR keywords LIKE ?) ");
         boolean hasGroup = groupId != null && !groupId.isBlank();
         sql.append(hasGroup ? "AND group_id = ? " : "AND group_id IS NULL ");
+        sql.append("AND (expires_at IS NULL OR expires_at > NOW()) ");
         sql.append("ORDER BY created_at DESC LIMIT 5");
 
         try (Connection conn = dataSource.getConnection();
@@ -242,6 +248,37 @@ public class LongTermMemoryRepository implements Repository {
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 查找同名已过期的事实（用于刷新而非重复插入） */
+    public List<LongTermMemory> findExpiredByUser(String userId, String content) throws SQLException {
+        String sql = "SELECT * FROM long_term_memories WHERE user_id = ? AND content LIKE ? "
+                + "AND expires_at IS NOT NULL AND expires_at <= NOW() ORDER BY expires_at DESC LIMIT 3";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, userId);
+            ps.setString(2, "%" + content + "%");
+            ResultSet rs = ps.executeQuery();
+            List<LongTermMemory> results = new ArrayList<>();
+            while (rs.next()) results.add(mapRow(rs));
+            return results;
+        }
+    }
+
+    /** 刷新过期事实：更新内容、关键词、有效期，重置为 ACTIVE */
+    public void refreshExpired(long id, String content, String keywords, LocalDateTime expiresAt) throws SQLException {
+        String sql = "UPDATE long_term_memories SET content = ?, keywords = ?, expires_at = ?, "
+                + "last_confirmed_at = NOW(), last_seen_at = NOW(), status = 'ACTIVE', "
+                + "confidence = 0.4, updated_at = NOW() WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, content);
+            ps.setString(2, keywords);
+            if (expiresAt != null) ps.setTimestamp(3, Timestamp.valueOf(expiresAt));
+            else ps.setNull(3, Types.TIMESTAMP);
+            ps.setLong(4, id);
             ps.executeUpdate();
         }
     }
@@ -286,6 +323,7 @@ public class LongTermMemoryRepository implements Repository {
         try { Timestamp lua = rs.getTimestamp("last_used_at"); if (lua != null) m.setLastUsedAt(lua.toLocalDateTime()); } catch (SQLException ignored) {}
         try { m.setConfidence(rs.getDouble("confidence")); if (rs.wasNull()) m.setConfidence(1.0); } catch (SQLException ignored) {}
         try { String st = rs.getString("status"); m.setStatus(st != null ? st : "ACTIVE"); } catch (SQLException ignored) {}
+        try { Timestamp ea = rs.getTimestamp("expires_at"); if (ea != null) m.setExpiresAt(ea.toLocalDateTime()); } catch (SQLException ignored) {}
         return m;
     }
 }

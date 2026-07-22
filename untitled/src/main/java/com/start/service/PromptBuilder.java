@@ -17,6 +17,7 @@ public class PromptBuilder {
         Set<RuleCategory> cats = EnumSet.allOf(RuleCategory.class);
         if (!ctx.isGuier) {
             cats.remove(RuleCategory.SELF_EVOLVE);
+            cats.remove(RuleCategory.INSPECTION);
         }
         return cats;
     }
@@ -177,7 +178,11 @@ public class PromptBuilder {
             if (r.unresolvedQuestion() != null && !r.unresolvedQuestion().isBlank()) {
                 sb.append("，还没解决的问题：").append(r.unresolvedQuestion());
             }
-            if (r.ageMinutes() > 5) {
+            if (r.ageMinutes() >= 60 * 24) {
+                sb.append("（").append(r.ageMinutes() / (60 * 24)).append("天前）");
+            } else if (r.ageMinutes() >= 60) {
+                sb.append("（").append(r.ageMinutes() / 60).append("小时前）");
+            } else if (r.ageMinutes() > 5) {
                 sb.append("（").append(r.ageMinutes()).append("分钟前）");
             }
         }

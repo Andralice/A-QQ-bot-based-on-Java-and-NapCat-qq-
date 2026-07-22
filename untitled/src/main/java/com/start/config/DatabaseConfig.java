@@ -216,6 +216,7 @@ public class DatabaseConfig {
             "ALTER TABLE long_term_memories ADD COLUMN last_used_at TIMESTAMP NULL",
             "ALTER TABLE long_term_memories ADD COLUMN confidence DOUBLE DEFAULT 1.0",
             "ALTER TABLE long_term_memories ADD COLUMN status VARCHAR(20) DEFAULT 'ACTIVE'",
+            "ALTER TABLE long_term_memories ADD COLUMN expires_at TIMESTAMP NULL",
 
             // 知识库黑名单
             "CREATE TABLE IF NOT EXISTS knowledge_blacklist (" +
@@ -330,6 +331,22 @@ public class DatabaseConfig {
                 "health_note VARCHAR(500) DEFAULT '轻微心脏问题，不需每天上学'," +
                 "updated_at DATE NOT NULL," +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 糖果熊事件流：记录一天中实际发生的事（日程执行、聊天互动、心情变化）
+            "CREATE TABLE IF NOT EXISTS candy_bear_event_log (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "event_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+                "event_date DATE NOT NULL," +
+                "event_type VARCHAR(20) NOT NULL DEFAULT 'MANUAL'," +
+                "summary TEXT NOT NULL," +
+                "emotion VARCHAR(20) DEFAULT ''," +
+                "emotion_impact INT DEFAULT 0," +
+                "source_group_id VARCHAR(50) DEFAULT ''," +
+                "source_user_id VARCHAR(50) DEFAULT ''," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_el_date (event_date)," +
+                "INDEX idx_el_type (event_type)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
             // 周期任务（工具联动）：LLM 存入 prompt，调度线程到时取出发给 LLM 自由执行

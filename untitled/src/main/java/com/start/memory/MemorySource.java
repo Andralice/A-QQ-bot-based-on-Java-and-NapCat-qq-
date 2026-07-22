@@ -9,5 +9,7 @@ public enum MemorySource {
     /** 归儿确认的 — 最高可信度 */
     GUIER_CONFIRMED,
     /** 从知识库提取 */
-    KNOWLEDGE_BASE
+    KNOWLEDGE_BASE,
+    /** LLM 根据人设自动形成的设定 — 基础置信度较低，随确认次数提升 */
+    AUTO_FORMED
 }

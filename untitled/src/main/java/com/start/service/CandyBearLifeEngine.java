@@ -1,8 +1,10 @@
 package com.start.service;
 
+import com.start.config.DatabaseConfig;
 import com.start.model.*;
 import com.start.repository.CandyBearLifeRepository;
 import com.start.repository.CandyBearScheduleRepository;
+import com.start.repository.EventLogRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +39,7 @@ public class CandyBearLifeEngine {
 
     private final CandyBearLifeRepository repo;
     private final CandyBearScheduleRepository scheduleRepo;
+    private final EventLogRepository eventRepo;
     private final BaiLianService ai;
 
     /** 硬编码的默认人设（DB不可用时 fallback） */
@@ -50,6 +53,7 @@ public class CandyBearLifeEngine {
     public CandyBearLifeEngine(CandyBearLifeRepository repo, CandyBearScheduleRepository scheduleRepo, BaiLianService ai) {
         this.repo = repo;
         this.scheduleRepo = scheduleRepo;
+        this.eventRepo = new EventLogRepository(DatabaseConfig.getDataSource());
         this.ai = ai;
     }
 
@@ -139,11 +143,21 @@ public class CandyBearLifeEngine {
         }
     }
 
-    /** 每天凌晨调用：生成昨天的日记 */
+    /** 每天凌晨调用：把昨天的日程写入事件流，然后生成日记 */
     public void dailyTick() {
+        LocalDate yesterday = LocalDate.now().minusDays(1);
+
+        // 把昨天的日程活动写入事件流（给日记提供素材）
+        try {
+            if (!eventRepo.hasEvents(yesterday)) {
+                writeScheduleEvents(yesterday);
+            }
+        } catch (Exception e) {
+            logger.error("[LifeEngine] dailyTick 写事件: " + e.getMessage());
+        }
+
         // 昨天日记
         try {
-            LocalDate yesterday = LocalDate.now().minusDays(1);
             if (!repo.hasJournal(yesterday)) {
                 generateDailyJournal(yesterday);
             }
@@ -177,6 +191,41 @@ public class CandyBearLifeEngine {
         } catch (Exception e) {
             logger.error("[LifeEngine] dailyTick arc: " + e.getMessage());
         }
+    }
+
+    /** 把某天的日程活动写入事件流，作为日记的事实素材 */
+    private void writeScheduleEvents(LocalDate date) {
+        try {
+            List<CandyBearSchedule> daySchedule = scheduleRepo.findToday(date);
+            if (daySchedule.isEmpty()) return;
+
+            for (CandyBearSchedule s : daySchedule) {
+                CandyBearEventLog e = new CandyBearEventLog();
+                // 用日程的开始时间作为事件时间
+                e.setEventTime(date.atTime(s.getStartTime()));
+                e.setEventDate(date);
+                e.setEventType("SCHEDULE");
+                e.setSummary(s.getActivity());
+                e.setEmotion(s.getMood() != null ? s.getMood() : "");
+                // 把 mood 映射为 emotion_impact
+                e.setEmotionImpact(moodToImpact(s.getMood()));
+                eventRepo.insert(e);
+            }
+        } catch (Exception e) {
+            logger.error("[LifeEngine] writeScheduleEvents 失败 " + date + ": " + e.getMessage());
+        }
+    }
+
+    /** 把心情词映射为 -5~+5 的影响值 */
+    private int moodToImpact(String mood) {
+        if (mood == null) return 0;
+        return switch (mood) {
+            case "超开心", "开心", "舒服", "悠闲", "充实", "感动", "兴奋" -> 2;
+            case "还行", "放松", "平静" -> 0;
+            case "累", "无聊", "慵懒", "困" -> -1;
+            case "痛苦", "emo", "烦躁", "焦虑", "又气又爽" -> -2;
+            default -> 0;
+        };
     }
 
     // ===== 生成 Story Arc =====
@@ -293,12 +342,35 @@ public class CandyBearLifeEngine {
         Optional<CandyBearStoryArc> arc = repo.findActiveArc();
         String arcCtx = arc.map(a -> "当前章节：【" + a.getArcName() + "】" + a.getSummary()).orElse("");
 
-        // 读取当天日程作为 grounding
+        // 读取当天事件流作为主要素材
+        String eventLogCtx = "";
+        try {
+            List<CandyBearEventLog> events = eventRepo.findByDate(date);
+            if (!events.isEmpty()) {
+                StringBuilder sb = new StringBuilder("今天实际发生的事件：\n");
+                for (CandyBearEventLog ev : events) {
+                    String timeStr = ev.getEventTime() != null
+                            ? ev.getEventTime().toLocalTime().toString().substring(0, 5) : "";
+                    sb.append(timeStr).append(" [").append(ev.getEventType()).append("] ")
+                      .append(ev.getSummary());
+                    if (ev.getEmotion() != null && !ev.getEmotion().isEmpty()) {
+                        sb.append("（").append(ev.getEmotion()).append("）");
+                    }
+                    sb.append("\n");
+                }
+                eventLogCtx = sb.toString();
+            }
+        } catch (Exception e) {
+            // 事件流是可选上下文
+        }
+
+        // 日程作为辅助上下文（有事件流时只用于对比，无事件流时作为 grounding）
         String scheduleCtx = "";
+        boolean hasEvents = !eventLogCtx.isEmpty();
         try {
             List<CandyBearSchedule> daySchedule = scheduleRepo.findToday(date);
             if (!daySchedule.isEmpty()) {
-                StringBuilder sb = new StringBuilder("今天日程：\n");
+                StringBuilder sb = new StringBuilder(hasEvents ? "今天原定日程（可对比实际执行情况）：\n" : "今天日程：\n");
                 for (CandyBearSchedule s : daySchedule) {
                     sb.append(s.getTimeSlot()).append(" ").append(s.getStartTime()).append("~").append(s.getEndTime())
                       .append(" ").append(s.getActivity()).append("（").append(s.getLocation()).append("）")
@@ -308,11 +380,15 @@ public class CandyBearLifeEngine {
                 scheduleCtx = sb.toString();
             }
         } catch (Exception e) {
-            // 日程是可选上下文，不影响日记生成
+            // 日程是可选上下文
         }
 
-        String prompt = buildLifeStatePrompt() + "\n\n" + buildPersonaStyleGuide() + "\n\n" + arcCtx + "\n" + yesterdayCtx + "\n" + scheduleCtx + "\n" +
+        String grounding = hasEvents
+                ? "以下是今天实际发生的事件记录，请根据这些事件总结日记。不要凭空编造没有发生的事。日程可作参考对比。"
+                : "请根据下面的日程和人设，为糖果熊写今天的日记。";
+        String prompt = buildLifeStatePrompt() + "\n\n" + buildPersonaStyleGuide() + "\n\n" + arcCtx + "\n" + yesterdayCtx + "\n" + eventLogCtx + "\n" + scheduleCtx + "\n" +
                 "今天是" + date + " " + getWeekday(date) + "。\n" +
+                grounding + "\n\n" +
                 "请为糖果熊写今天（" + date + "）的日记。格式：\n" +
                 "今日摘要：（5~8句话，口语化少女日记。要有具体细节——上了什么课、跟谁聊了什么、打了什么游戏打到什么段位、看了什么番、吃了什么、吐槽了什么，不要写笼统的概括。像真实的17岁女孩在记事，有流水账感也没关系。）\n" +
                 "重要事件：（JSON数组，每条要具体，如[\"数学课被老师点名做题居然做对了\",\"跟小雨在食堂聊到隔壁班的八卦\",\"三角洲排位三连跪气死\",\"妈妈晚上打电话问学习\"]）\n" +
@@ -320,10 +396,14 @@ public class CandyBearLifeEngine {
                 "要求：\n" +
                 "1. 延续昨天的日记内容，不要矛盾。\n" +
                 "2. 日记要具体有内容，不要只写一两句笼统的感受。\n" +
-                "3. 如果上面给出了今天的日程，细致地按日程写出来。\n" +
-                "4. 如果没有日程，根据人物状态和当前章节自行发挥。\n" +
+                (hasEvents
+                    ? "3. 以上面的事件流为主要素材，日程只作参考。有事件就用事件，不要编造。\n"
+                    : "3. 如果上面给出了今天的日程，细致地按日程写出来。\n")
+                + "4. 如果没有日程也没有事件，根据人物状态和当前章节自行发挥。\n" +
                 "5. 语气像17岁女孩写日记——可以吐槽、可以emo、可以碎碎念，不要AI腔。\n" +
-                "6. 上学日与否以日程为准；无日程时上学日概率约40%（一周2~3天）。";
+                (hasEvents
+                    ? "6. 上学日与否以事件为准；无事件时以日程为准。\n"
+                    : "6. 上学日与否以日程为准；无日程时上学日概率约40%（一周2~3天）。\n");
 
         String response = ai.generateRaw(prompt);
         if (response == null || response.isBlank()) {
@@ -370,6 +450,46 @@ public class CandyBearLifeEngine {
             if (week.isPresent()) {
                 sb.append("\n【本周计划】").append(week.get().getNextWeekPlan());
             }
+
+            // 今日事件流（真实发生的）
+            try {
+                List<CandyBearEventLog> todayEvents = eventRepo.findByDate(LocalDate.now());
+                if (!todayEvents.isEmpty()) {
+                    sb.append("\n【今日事件】\n");
+                    for (CandyBearEventLog ev : todayEvents) {
+                        String timeStr = ev.getEventTime() != null
+                                ? ev.getEventTime().toLocalTime().toString().substring(0, 5) : "";
+                        sb.append(timeStr).append(" [").append(ev.getEventType()).append("] ")
+                          .append(ev.getSummary());
+                        if (ev.getEmotion() != null && !ev.getEmotion().isEmpty()) {
+                            sb.append("（").append(ev.getEmotion()).append("）");
+                        }
+                        sb.append("\n");
+                    }
+                }
+            } catch (Exception e) { /* 可选 */ }
+
+            // 近日事件（最近3天，给连续性。跳过今天，因为上面已有"今日事件"）
+            try {
+                List<CandyBearEventLog> recentEvents = eventRepo.findRecent(4);
+                if (!recentEvents.isEmpty()) {
+                    sb.append("\n【近日事件】\n");
+                    LocalDate today = LocalDate.now();
+                    LocalDate lastDate = null;
+                    for (CandyBearEventLog ev : recentEvents) {
+                        if (ev.getEventDate().equals(today)) continue; // 跳过今天
+                        if (lastDate == null || !lastDate.equals(ev.getEventDate())) {
+                            lastDate = ev.getEventDate();
+                            sb.append(lastDate).append(" ").append(getWeekday(lastDate)).append("：\n");
+                        }
+                        sb.append("  - ").append(ev.getSummary());
+                        if (ev.getEmotion() != null && !ev.getEmotion().isEmpty()) {
+                            sb.append("（").append(ev.getEmotion()).append("）");
+                        }
+                        sb.append("\n");
+                    }
+                }
+            } catch (Exception e) { /* 可选 */ }
 
             // 今日日程
             try {

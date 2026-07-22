@@ -20,7 +20,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 抽职业（运势驱动位阶波动，DB 持久化有状态）
+ * 抽职业（位阶独立波动，与今日幸运值无关，DB 持久化有状态）
  */
 public class DailyProfessionHandler implements MessageHandler {
     private static final Logger logger = LoggerFactory.getLogger(DailyProfessionHandler.class);
@@ -79,15 +79,49 @@ public class DailyProfessionHandler implements MessageHandler {
                     result.name + "（" + getTierName(result.tier) + "）战力：" + result.combatPower);
         }
 
-        logger.info("👤 群{} 用户{} 职业={} {}阶 [{}] 战力={} 运势={} {}",
+        logger.info("👤 群{} 用户{} 职业={} {}阶 [{}] 战力={} 今日幸运值={} {}",
                 groupId, userId, result.name, result.tier, result.rarity,
                 result.combatPower, result.todayLuck, result.changeDesc);
     }
 
-    // ===== 核心逻辑：运势驱动位阶波动 =====
+    // ===== 核心逻辑：位阶独立波动（不依赖今日幸运值） =====
 
-    /** 为用户抽取今日职业（有状态，运势驱动）。供 Handler、Tool、Rank 共用。 */
+    /** 为用户抽取今日职业（有状态，位阶独立波动）。供 Handler、Tool、Rank 共用。 */
+    /**
+     * 启动后全员重抽：遍历 user_professions 表，对每个用户强制走一次 drawForUser。
+     * 调一次后当日已抽状态被刷新（updated_at=NOW()），之后用户主动查不会再重抽。
+     */
+    public static void rerollAllProfessions() {
+        List<UserProfession> all;
+        try {
+            all = repo.findAll();
+        } catch (SQLException e) {
+            logger.error("rerollAllProfessions: 读取用户列表失败", e);
+            return;
+        }
+        int ok = 0, fail = 0;
+        for (UserProfession p : all) {
+            try {
+                drawForUser(p.getUserId(), p.getGroupId(), true);
+                ok++;
+            } catch (Exception e) {
+                fail++;
+                logger.warn("rerollAllProfessions: userId={} 重抽失败: {}", p.getUserId(), e.getMessage());
+            }
+        }
+        logger.info("🎲 启动后全员职业重抽完成: 成功={}, 失败={}, 共={}", ok, fail, all.size());
+    }
+
     public static ProfessionResult drawForUser(long userId, String groupId) {
+        return drawForUser(userId, groupId, false);
+    }
+
+    /**
+     * 为用户抽取今日职业（脉系 + 战力每天都随机重抽，但严格匹配位阶）。
+     *
+     * @param force true=无视"今日已抽过"检查强制重抽（启动后全员刷新用）
+     */
+    public static ProfessionResult drawForUser(long userId, String groupId, boolean force) {
         int luck = LuckUtil.getDailyLuck(userId);
         UserProfession p;
         try {
@@ -109,7 +143,8 @@ public class DailyProfessionHandler implements MessageHandler {
 
         // 今日已抽取过，直接返回当前值，保证同一天内多次查询结果一致
         // 但活动日需要纠正位阶、稀有度、战力（活动日之前可能已抽为非紫色），并回写DB
-        if (p.getUpdatedAt() != null && p.getUpdatedAt().toLocalDate().equals(LocalDate.now())) {
+        // force=true 时跳过此检查（启动后全员重抽用）
+        if (!force && p.getUpdatedAt() != null && p.getUpdatedAt().toLocalDate().equals(LocalDate.now())) {
             if (eventDay && (p.getTier() != 4 || p.getCombatPower() < 4500)) {
                 p.setTier(4);
                 p.setRarity("史诗");
@@ -132,13 +167,19 @@ public class DailyProfessionHandler implements MessageHandler {
         }
 
         int oldTier = p.getTier();
-        int newTier = computeNewTier(oldTier, luck, p.getStreakGood(), p.getStreakBad());
+        int newTier = computeNewTier(oldTier, p.getStreakGood(), p.getStreakBad());
 
         if (eventDay) {
             newTier = 4;
         }
 
-        // ── 运气战力大幅漂移 ──
+        // ⭐ 每天脉系重抽：用 userId+日期 作种子，保证同一天多次重抽结果稳定
+        long pathSeed = SeedUtil.seed(String.valueOf(userId), groupId, "path", LocalDate.now().toString());
+        Random pathRng = new Random(pathSeed);
+        String newPath = UserProfessionRepository.ProfessionPath.randomPath(pathRng);
+        p.setProfessionPath(newPath);
+
+        // ── 战力量子重抽：严格匹配位阶范围，不再走 luck 漂移 ──
         int yesterdayPower = p.getCombatPower();
         int power;
         int powerFromLuck;
@@ -146,24 +187,10 @@ public class DailyProfessionHandler implements MessageHandler {
             // 活动日：战力拉满到四阶最大值附近
             power = eventMaxPower(userId, groupId);
             powerFromLuck = power - yesterdayPower;
-        } else if (newTier != oldTier) {
-            // 位阶变化：战力量子跃迁到新位阶范围
-            int baseNew = UserProfessionRepository.ProfessionPath.randomPower(newTier, userId, groupId);
-            power = baseNew;
-            powerFromLuck = power - yesterdayPower;
         } else {
-            // 同位阶：运气驱动战功大幅漂移（±10%~35%）
-            long driftSeed = SeedUtil.seed(String.valueOf(userId), groupId, "luckdrift", LocalDate.now().toString());
-            Random driftRng = new Random(driftSeed);
-            double drift;
-            if (luck >= 80)      drift = 0.20 + driftRng.nextDouble() * 0.15;
-            else if (luck >= 60) drift = 0.05 + driftRng.nextDouble() * 0.15;
-            else if (luck >= 40) drift = -0.10 + driftRng.nextDouble() * 0.15;
-            else if (luck >= 20) drift = -0.20 + driftRng.nextDouble() * 0.15;
-            else                 drift = -0.35 + driftRng.nextDouble() * 0.20;
-
-            powerFromLuck = (int)(yesterdayPower * drift);
-            power = Math.max(50, yesterdayPower + powerFromLuck);
+            // 每天在当前位阶范围内重抽战力（与新位阶严格匹配）
+            power = UserProfessionRepository.ProfessionPath.randomPower(newTier, userId, groupId);
+            powerFromLuck = power - yesterdayPower;
         }
 
         // 更新连击
@@ -180,11 +207,11 @@ public class DailyProfessionHandler implements MessageHandler {
         if (eventDay) {
             changeDesc = "💜 紫色史诗日！全员位阶飙升！";
         } else if (newTier > oldTier) {
-            changeDesc = streakGood >= 3 ? "🔥 三连升！运势爆棚！" : "⬆️ 运势旺盛，位阶提升！";
+            changeDesc = streakGood >= 3 ? "🔥 三连升！修为精进！" : "⬆️ 修为精进，位阶提升！";
         } else if (newTier < oldTier) {
-            changeDesc = streakBad >= 3 ? "💀 三连降…诸事不宜！" : "⬇️ 运势低迷，位阶滑落…";
+            changeDesc = streakBad >= 3 ? "💀 三连降…道心受挫！" : "⬇️ 修炼受挫，位阶滑落…";
         } else {
-            changeDesc = "➡️ 今日运势平稳，修为巩固中";
+            changeDesc = "➡️ 修为巩固中，稳扎稳打";
         }
 
         // 变动摘要
@@ -193,7 +220,7 @@ public class DailyProfessionHandler implements MessageHandler {
         } else if (newTier != oldTier) {
             summaryBuilder.append("位阶").append(oldTier).append("→").append(newTier).append("，战力").append(yesterdayPower).append("→").append(power).append("（跃迁");
         } else {
-            summaryBuilder.append("同位阶，战力").append(yesterdayPower).append("→").append(power).append("（运气漂移");
+            summaryBuilder.append("同位阶，战力").append(yesterdayPower).append("→").append(power).append("（波动");
         }
         String arrow = powerFromLuck >= 0 ? "+" : "";
         summaryBuilder.append(arrow).append(powerFromLuck).append("）");
@@ -255,39 +282,38 @@ public class DailyProfessionHandler implements MessageHandler {
     // ===== 位阶波动算法 =====
 
     /**
-     * 基于运势计算新位阶。
-     * 运势 >= 80: 升阶概率 40%（含 10% 跳2阶），不降
-     * 运势 >= 60: 升阶 20%，保持 75%，降阶 5%
-     * 运势 >= 40: 升阶 10%，保持 80%，降阶 10%
-     * 运势 >= 20: 升阶 5%，保持 75%，降阶 20%
-     * 运势 <  20: 升阶 0%，保持 60%，降阶 40%（含 10% 跳降2阶）
-     * 连续好运 3+ 天 → 升阶加权 +10%
-     * 连续霉运 3+ 天 → 降阶加权 +10%
+     * 位阶独立波动（与今日幸运值完全无关）。
+     * <p>
+     * 基础分布（无连击）：
+     *   保持 60% / 升1阶 20% / 升2阶 5% / 降1阶 10% / 降2阶 5%
+     * <p>
+     * 连击加权（状态反馈，与 luck 无关）：
+     *   连续升 3+ 天 → 升阶 +20%，降阶 -10%（不低于 0）
+     *   连续降 3+ 天 → 降阶 +20%，升阶 -10%（不低于 0）
+     * <p>
+     * 种子只依赖 currentTier + today，完全不包含幸运值。
+     * 边界裁剪到 [1, 5]。
      */
-    static int computeNewTier(int currentTier, int luck, int streakGood, int streakBad) {
+    static int computeNewTier(int currentTier, int streakGood, int streakBad) {
         String today = LocalDate.now().toString();
-        long seed = SeedUtil.seed(String.valueOf(currentTier), "drift", today, String.valueOf(luck));
+        long seed = SeedUtil.seed(String.valueOf(currentTier), "drift", today);
         Random rng = new Random(seed);
         int roll = rng.nextInt(100);
 
-        int upChance = 0, downChance = 0, jumpUp = 0, jumpDown = 0;
+        int upChance = 20;
+        int jumpUp = 5;
+        int downChance = 10;
+        int jumpDown = 5;
 
-        if (luck >= 80) {
-            upChance = 30; jumpUp = 10; downChance = 0;
-        } else if (luck >= 60) {
-            upChance = 15; jumpUp = 5; downChance = 5;
-        } else if (luck >= 40) {
-            upChance = 10; jumpUp = 0; downChance = 10;
-        } else if (luck >= 20) {
-            upChance = 5; jumpUp = 0; downChance = 20;
-        } else {
-            upChance = 0; jumpUp = 0; downChance = 30; jumpDown = 10;
+        // 连击加成（状态反馈，非幸运值驱动）
+        if (streakGood >= 3) {
+            upChance += 20;
+            downChance = Math.max(0, downChance - 10);
         }
-
-        // 连击加成
-        if (streakGood >= 3) { upChance += 10; }
-        if (streakBad >= 3) { downChance += 10; }
-
+        if (streakBad >= 3) {
+            downChance += 20;
+            upChance = Math.max(0, upChance - 10);
+        }
         int stayChance = 100 - upChance - jumpUp - downChance - jumpDown;
 
         int delta;

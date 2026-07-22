@@ -28,12 +28,14 @@ import com.start.agent.SendStatusTool;
 import com.start.agent.social.UserAffinityTool;
 import com.start.agent.WebSearchTool;
 import com.start.agent.EggGroupSearchTool;
+import com.start.agent.EstablishFactTool;
 import com.start.agent.social.SanjiaoTool;
 import com.start.agent.social.MerchantSubscribeTool;
 import com.start.agent.social.TravelingMerchantTool;
 import com.start.agent.KnowledgeBaseTool;
 import com.start.repository.MerchantRepository;
 import com.start.agent.LearnKnowledgeTool;
+import com.start.agent.LogEventTool;
 import com.start.agent.social.UserAliasTool;
 import com.start.agent.VoiceTool;
 import com.start.agent.WeatherTool;
@@ -76,6 +78,7 @@ import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserProfileRepository;
 import com.start.repository.BotMemoryRepository;
 import com.start.repository.EvolutionRecordRepository;
+import com.start.repository.EventLogRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.net.URI;
@@ -345,10 +348,16 @@ public class BaiLianService {
     public static class Message {
         public String role;
         public String content;
+        public long timestamp;  // 该条消息的时刻（epoch millis），跨天判断和时间戳注入用
 
         public Message(String role, String content) {
+            this(role, content, System.currentTimeMillis());
+        }
+
+        public Message(String role, String content, long timestamp) {
             this.role = role;
             this.content = content;
+            this.timestamp = timestamp;
         }
     }
 
@@ -532,13 +541,15 @@ public class BaiLianService {
         String agentToolContext = "";
         String publicGroupContext = "";
         String timeContext = "【当前时间】是：" + getBeijingTimeString()
-            + "\n调用 search_chat_history / recall_memory 查日期时，用 yyyy-MM-dd 格式：今天=" + getTodayDateStr()
-            + "，昨天=" + getYesterdayDateStr() + "，前天=" + getDayBeforeYesterdayStr();
+            + "\n调用 search_chat_history / recall_memory 查日期时，用 yyyy-MM-dd 格式。今天=" + getTodayDateStr()
+            + "（昨天/前天请自行 -1d / -2d）。"
+            + "session history 已带 [MM-dd HH:mm] 时间戳，请直接看时间戳判断每条消息的时序；"
+            + "若看到时间戳跨天/隔夜，说明是新的一天。";
 
         if (groupId != null) {
             Deque<PublicMessage> recent = getPublicGroupHistory(groupId);
             if (recent != null && !recent.isEmpty()) {
-                StringBuilder sb = new StringBuilder("\n\n【群内最近讨论】（带时间戳，帮你判断话题是今天/昨天/前天的）\n");
+                StringBuilder sb = new StringBuilder("\n\n【群内最近讨论】（过去 10 分钟内的群聊上下文，超过 10 分钟的消息已被清理）\n");
                 List<PublicMessage> list = new ArrayList<>(recent);
                 int start = Math.max(0, list.size() - 10);
                 for (int i = start; i < list.size(); i++) {
@@ -592,6 +603,14 @@ public class BaiLianService {
             if (lastClearTime.containsKey(sessionId)) {
                 history.clear();
                 lastClearTime.remove(sessionId);
+            } else if (!history.isEmpty()) {
+                // 跨段清理：最后一条消息距今超过 4 小时，视为新的一段对话（避免"bot 对昨天/前天产生惊讶"）
+                long now = System.currentTimeMillis();
+                long lastTs = history.get(history.size() - 1).timestamp;
+                if (now - lastTs > 4 * 60 * 60 * 1000L) {
+                    history.clear();
+                    logger.debug("session 跨段清理（>4h）: sessionId={}, lastTs={}", sessionId, lastTs);
+                }
             }
 
             if (!suppress) {
@@ -736,6 +755,7 @@ public class BaiLianService {
             messages.add(Map.of("role", "system", "content", systemPrompt));
 
             int start = Math.max(0, history.size() - 4);
+            java.time.format.DateTimeFormatter shortTs = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
             for (int i = start; i < history.size(); i++) {
                 Message msg = history.get(i);
                 String role = "user".equals(msg.role) ? "user" : "assistant";
@@ -745,7 +765,12 @@ public class BaiLianService {
                     content = content.substring(0, 600) + "...";
                 }
 
-                messages.add(Map.of("role", role, "content", content));
+                // 给 history 注入 [MM-dd HH:mm] 时间戳前缀，让 LLM 知道每条消息的时序
+                String timePrefix = java.time.LocalDateTime.ofInstant(
+                        java.time.Instant.ofEpochMilli(msg.timestamp),
+                        java.time.ZoneId.of("Asia/Shanghai")
+                ).format(shortTs);
+                messages.add(Map.of("role", role, "content", "[" + timePrefix + "] " + content));
             }
 
             // PR4: suppress 模式下 user message 不在 history 中，手动追加到 messages 数组
@@ -763,6 +788,8 @@ public class BaiLianService {
             recallMemoryTool.setAutoKeywords(hanlpKeywords);
 
             EvolutionRecordRepository evoRepo = new EvolutionRecordRepository(DatabaseConfig.getDataSource());
+
+            boolean isAdmin = String.valueOf(BotConfig.getAdminQq()).equals(userId);
 
             final List<Tool> availableTools = new ArrayList<>(Arrays.asList(
                     new WeatherTool(userAliasRepo),
@@ -784,6 +811,7 @@ public class BaiLianService {
                     new QueryFileTool(botInstance, this, userId, sessionId),
                     new SearchHistoryTool(ltmRepo),
                     new RememberFactTool(ltmRepo),
+                    new EstablishFactTool(ltmRepo),
                     recallMemoryTool,
                     new ScheduleEventTool(ltmRepo),
                     new SendStatusTool(botInstance, groupId, userId),
@@ -794,23 +822,29 @@ public class BaiLianService {
                     new MerchantSubscribeTool(merchantRepo != null ? merchantRepo : new MerchantRepository()),
                     new AwaitReplyTool(botInstance, this, groupId, userId, sessionId),
                     new QueryLifeTool(lifeEngine),
-                    new ShellTool(shellService != null ? shellService : new ServerAdminService(), userId),
+                    new LogEventTool(new EventLogRepository(DatabaseConfig.getDataSource())),
                     new ScheduleRecurringTaskTool(new RecurringTaskRepository(DatabaseConfig.getDataSource())),
                     new StickerTool(botInstance),
                     new LinkPreviewTool(),
                     new WebFetchTool(),
-                    new SelfEvolveTool(userId, evoRepo),
-                    new RestartBotTool(userId),
-                    new UpdateConfigTool(runtimeConfig, userId),
-                    new ReadCodeTool(),
-                    new CreateFileTool(userId),
-                    new AuditTool(),
-                    new AuditAgentTool(),
                     new DigestTool(),
                     new SearchDigestTool(),
                     new EvolutionHistoryTool(evoRepo),
                     new QueryImagesTool(new MessageRepository())
             ));
+            // 归儿专属工具（code/audit/shell/self_evolve），非管理员不发，省 token
+            if (isAdmin) {
+                availableTools.addAll(Arrays.asList(
+                        new ShellTool(shellService != null ? shellService : new ServerAdminService(), userId),
+                        new SelfEvolveTool(userId, evoRepo),
+                        new RestartBotTool(userId),
+                        new UpdateConfigTool(runtimeConfig, userId),
+                        new ReadCodeTool(),
+                        new CreateFileTool(userId),
+                        new AuditTool(),
+                        new AuditAgentTool()
+                ));
+            }
             // Phase 3: 工作记忆存在时，set_belief 退场，由 set_working_memory 接管
             if (wm == null) {
                 availableTools.add(new SetBeliefTool(
@@ -1443,16 +1477,28 @@ public class BaiLianService {
         }
         reply = reply.trim();
 
-        // AI 自己决定的分段（|---| 分隔符）
+        // XML 标签分隔（推荐，GPT 系列模型稳定性远高于 |---|）
+        java.util.regex.Matcher msgMatcher = java.util.regex.Pattern.compile("<msg>(.*?)</msg>", java.util.regex.Pattern.DOTALL).matcher(reply);
+        if (msgMatcher.find()) {
+            List<String> parts = new ArrayList<>();
+            msgMatcher.reset();
+            while (msgMatcher.find()) {
+                String part = msgMatcher.group(1).trim();
+                if (!part.isEmpty()) parts.add(part);
+            }
+            if (!parts.isEmpty()) return parts;
+        }
+
+        // 旧格式兜底（|---| 分隔符，向后兼容旧 Prompt）
         if (reply.contains("|---|")) {
             return Arrays.stream(reply.split("\\|---\\|"))
                     .map(String::trim)
-                    .map(s -> s.replaceAll("\\n{2,}", "\n"))  // 清理段内残留空行
+                    .map(s -> s.replaceAll("\\n{2,}", "\n"))
                     .filter(s -> !s.isEmpty())
                     .collect(java.util.stream.Collectors.toList());
         }
 
-        // 兜底：AI 没用 |---| 但有空行时，按空行切分段落
+        // 兜底：AI 没用分隔符但有空行时，按空行切分段落
         if (reply.contains("\n\n")) {
             List<String> allParts = new ArrayList<>();
             String[] paragraphs = reply.split("\\n\\s*\\n");
@@ -1465,6 +1511,18 @@ public class BaiLianService {
                 return new ArrayList<>(allParts.subList(0, 10));
             }
             return allParts.isEmpty() ? Arrays.asList(reply) : allParts;
+        }
+
+        // 单个换行切分：仅当切出 ≤5 条时生效，避免结构化内容（排行榜/表格）逐行刷屏
+        if (reply.contains("\n")) {
+            List<String> lines = new ArrayList<>();
+            for (String line : reply.split("\\n")) {
+                line = line.trim();
+                if (!line.isEmpty()) lines.add(line);
+            }
+            if (lines.size() <= 5) {
+                return lines;
+            }
         }
 
         // 提取开头的 CQ 码，避免切分时截断

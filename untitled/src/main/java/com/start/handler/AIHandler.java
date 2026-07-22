@@ -534,7 +534,7 @@ public class AIHandler implements MessageHandler {
 
 
     private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
-        groupExecutor.execute(groupId, () -> {
+        groupExecutor.execute(sessionId, () -> {
             List<String> imageDataUris = downloadImages(imageInfos);
             String imageDesc = aiService.describeImages(imageDataUris);
             String linkContext = buildLinkContext(linksToFetch);

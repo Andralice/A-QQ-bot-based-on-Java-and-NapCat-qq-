@@ -26,6 +26,7 @@ public class LongTermMemory {
     private String status = "ACTIVE";        // 状态：ACTIVE/UNCERTAIN/OUTDATED/CONTRADICTED/CONFIRMED
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    private LocalDateTime expiresAt;             // TTL 过期时间，null 表示永不过期
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -86,4 +87,7 @@ public class LongTermMemory {
 
     public LocalDateTime getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+
+    public LocalDateTime getExpiresAt() { return expiresAt; }
+    public void setExpiresAt(LocalDateTime expiresAt) { this.expiresAt = expiresAt; }
 }

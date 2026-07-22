@@ -31,9 +31,11 @@ public class ConversationInterpreter {
 
         stateStore.purgeExpiredAwaits();
 
+        boolean atsOthers = ats != null && ats.stream().anyMatch(q -> q != BotConfig.getBotQq());
+
         // 1. 追问检测（120s 窗口）
         ConversationStateStore.UserThread thread = stateStore.getUserThread(fullUserId);
-        if (thread != null && now - thread.lastInteraction() < 120_000) {
+        if (!atsOthers && thread != null && now - thread.lastInteraction() < 120_000) {
             if (isFollowUpMessage(message)) {
                 stateStore.removePendingAwait(fullUserId); // cancel await
                 String cleanReply = normalizeReplyForContext(thread.lastBotReply());
@@ -52,7 +54,11 @@ public class ConversationInterpreter {
             return InterpretResult.of(ConversationEvent.AWAIT_REPLY, prompt);
         }
 
-        // 3. 概率性主动插话
+        // 3. 概率性主动插话（消息 @ 了别人则跳过，不插嘴）
+        if (atsOthers) {
+            return InterpretResult.NOTHING;
+        }
+
         Map<String, Object> personality = aiDatabaseService.getCandyBearPersonality();
         @SuppressWarnings("unchecked")
         Map<String, Object> activeReply = (Map<String, Object>) personality.get("activeReply");

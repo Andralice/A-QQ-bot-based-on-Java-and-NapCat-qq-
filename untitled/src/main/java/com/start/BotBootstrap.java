@@ -3,6 +3,7 @@ package com.start;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.handler.CPTracker;
+import com.start.handler.DailyProfessionHandler;
 import com.start.handler.HandlerRegistry;
 import com.start.runtime.ConversationRuntime;
 import com.start.runtime.conversation.ConversationRuntimeConfig;
@@ -103,6 +104,9 @@ public final class BotBootstrap {
         bot.baiLianService.setLifeEngine(lifeEngine);
         lifeEngine.onStartup();
         logger.info("糖果熊人生引擎已启动（四层架构：章节->周记->日记->工具查询 + LifeState + 日程表）");
+
+        // 今日首次部署：全员职业重抽（脉系+战力每日随机）
+        DailyProfessionHandler.rerollAllProfessions();
 
         startLifeEngineThread(bot, lifeEngine);
         startPortraitService(bot);
