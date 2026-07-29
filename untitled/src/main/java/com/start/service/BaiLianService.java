@@ -663,14 +663,26 @@ public class BaiLianService {
                         if (currentThreadId != null) {
                             WorkingMemoryRepository wmRepo = new WorkingMemoryRepository(DatabaseConfig.getDataSource());
                             wm = wmRepo.findActiveByThread(currentThreadId);
+                            // 生命周期自动检测：用户消息含"取消/结束"意图 + 有 ACTIVE 任务 → 自动关闭
+                            // 防止 LLM 忘记调 set_working_memory(COMPLETED) 导致幽灵任务
+                            if (wm != null) {
+                                // 生命周期自动检测：纯函数判断是否应关闭，副作用由我们执行
+                                MemoryLifecycleDetector detector = new MemoryLifecycleDetector();
+                                if (detector.shouldComplete(wm, userPrompt)) {
+                                    wmRepo.markCompleted(wm.getId());
+                                    logger.debug("WorkingMemory auto-completed by lifecycle detector (wm_id={})", wm.getId());
+                                    wm = null; // 本轮不再注入
+                                }
+                            }
                             if (wm != null) {
                                 ctx.workingMemory(wm);
-                                // P1: Belief 按 Thread participants 过滤（仅在任务模式下生效）
-                                ConversationThread currentThread = scene.activeThreads().stream()
-                                        .filter(t -> t.getId().equals(currentThreadId))
-                                        .findFirst().orElse(null);
-                                if (currentThread != null && !currentThread.getParticipants().contains(userId)) {
-                                    ctx.beliefRecalls(null);
+                                // Belief 是用户级认知，不该被 Thread 覆盖。
+                                // 原逻辑：非 Thread 参与者时清空 belief → 会让"路过群但一直在聊"的用户丢认知。
+                                // 改为：只按时间窗口过滤，超过 2 小时的 Belief 自动失活，不注入。
+                                if (ctx.beliefRecalls != null && !ctx.beliefRecalls.isEmpty()) {
+                                    ctx.beliefRecalls(ctx.beliefRecalls.stream()
+                                            .filter(b -> b.ageMinutes() >= 0 && b.ageMinutes() < 120)
+                                            .toList());
                                 }
                             }
                         }

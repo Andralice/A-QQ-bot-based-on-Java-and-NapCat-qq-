@@ -1,5 +1,6 @@
 package com.start.agent;
 
+import com.start.memory.SemanticSimilarity;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 
@@ -58,16 +59,17 @@ public class RememberFactTool implements Tool {
         String trimmedContent = content.trim();
         String keywords = (String) args.get("keywords");
 
-        // 检查是否有相似记忆，有则强化而非重复插入
+        // 语义相似度精排：先拉 20 条候选（不限关键词覆盖召回），再用 SemanticSimilarity 排序
+        // 避免 LIKE '%英短%' 漏掉 '%橘猫%' 这种字面不匹配但语义相近的情况
         try {
-            List<LongTermMemory> similar = repo.findSimilar(userId, groupId, trimmedContent, keywords);
-            if (!similar.isEmpty()) {
-                LongTermMemory existing = similar.get(0);
-                repo.upsertConfirm(existing.getId());
+            List<LongTermMemory> candidates = repo.findRecentByUser(userId, groupId, 20);
+            LongTermMemory best = rankBySemanticSimilarity(candidates, trimmedContent, keywords);
+            if (best != null) {
+                repo.upsertConfirm(best.getId());
                 return "已更新记忆: " + trimmedContent + "（之前已存在，已强化确认）";
             }
         } catch (Exception e) {
-            logger.warn("Upsert check failed, falling through to insert: {}", e.getMessage());
+            logger.warn("Semantic upsert check failed, falling through to insert: {}", e.getMessage());
         }
 
         LongTermMemory m = new LongTermMemory();
@@ -95,5 +97,33 @@ public class RememberFactTool implements Tool {
     private int parseIntSafe(String s, int def) {
         if (s == null) return def;
         try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; }
+    }
+
+    /** 阈值：≥ 0.50 强相似 → 走 upsertConfirm。0.30~0.50 视为不同主题，< 0.30 太弱都视为不同。 */
+    private static final double STRONG_SIMILARITY_THRESHOLD = 0.50;
+
+    /**
+     * 对候选记忆做语义相似度精排，返回最相似的那条（如果超过阈值）。
+     * 改自原 findSimilar 版的纯 LIKE 召回：现在用 SemanticSimilarity
+     * 综合 Jaccard（关键词重合）+ 字符 n-gram（字面相似）。
+     */
+    private LongTermMemory rankBySemanticSimilarity(List<LongTermMemory> candidates,
+                                                     String newContent, String newKeywords) {
+        if (candidates == null || candidates.isEmpty()) return null;
+        LongTermMemory best = null;
+        double bestScore = 0.0;
+        for (LongTermMemory m : candidates) {
+            // 已过期/已触发的定时事件不参与 upsert，直接跳过
+            if (m.isTriggered()) continue;
+            if (m.getExpiresAt() != null && m.getExpiresAt().isBefore(LocalDateTime.now())) continue;
+            double s = SemanticSimilarity.score(
+                    newContent, newKeywords,
+                    m.getContent(), m.getKeywords());
+            if (s > bestScore) {
+                bestScore = s;
+                best = m;
+            }
+        }
+        return bestScore >= STRONG_SIMILARITY_THRESHOLD ? best : null;
     }
 }

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.Main;
 import com.start.config.BotConfig;
+import com.start.config.DatabaseConfig;
 import com.start.service.BaiLianService;
 import com.start.service.BotMoodService;
 import com.start.service.ConversationEvent;
@@ -17,8 +18,12 @@ import com.start.service.ConversationState;
 import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
+import com.start.memory.MemoryInterpreter;
+import com.start.memory.MemoryRecall;
 import com.start.model.DecisionContext;
 import com.start.model.DecisionTrace;
+import com.start.model.LongTermMemory;
+import com.start.repository.LongTermMemoryRepository;
 import com.start.runtime.ConversationRuntime;
 import com.start.runtime.conversation.ConversationRuntimeConfig;
 import com.start.runtime.conversation.ConversationSession;
@@ -26,6 +31,7 @@ import com.start.runtime.RuntimeEvent;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.util.MessageUtil;
 import com.start.vision.ImageUtils;
+import com.hankcs.hanlp.HanLP;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,10 +66,20 @@ public class AIHandler implements MessageHandler {
     private final ConversationInterpreter interpreter;
     private final ConversationRuntime runtime;
     private final ConversationRuntimeConfig config;
+    /** 长期记忆仓库：rate_limited 时的快速记忆查询用（不调 LLM） */
+    private final LongTermMemoryRepository memoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
+    private final MemoryInterpreter memoryInterpreter = new MemoryInterpreter();
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
+
+    /** 记忆查询意图关键词：rate_limited 时如果用户明显在问"你还记得..."，不沉默，先查记忆给短回复 */
+    private static final String[] MEMORY_QUERY_KEYWORDS = {
+            "记得", "还记得", "之前说过", "之前说", "你说过", "你说",
+            "你之前", "你刚说", "我说过", "我说", "你提过", "上次",
+            "你说过吧", "我说过吧"
+    };
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
                      ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config) {
@@ -242,6 +258,19 @@ public class AIHandler implements MessageHandler {
         }
 
         if (rateLimited) {
+            // 记忆查询快路径：rate_limited 但用户明显在问"你还记得..."
+            // 不沉默，DB 查一下就发短回复——成本极低，避免"我刚才走神"答错体验。
+            // 注意：只更新 groupReplyTime 不更新 userReactionTime，避免被刷屏
+            String shortReply = tryFastMemoryReply(uid, gid, plainText);
+            if (shortReply != null) {
+                lastGroupReplyTime.put(gid, now);
+                sendSplitGroupReplies(bot, groupId, shortReply);
+                // 留痕：让后续 Interpreter 能识别到这条 ai_reply
+                // （否则 fast path 回复后的 3 分钟内，AI_COMMENTED 事件识别不到）
+                aiService.recordGroupContext(gid, uid, "糖果熊", shortReply, "ai_reply");
+                logDecision(gid, uid, result.event().name(), "REPLY", "memory_recall_fast", 0, 0, 0);
+                return;
+            }
             logDecision(gid, uid, result.event().name(), "SILENT", "rate_limited", 0, 0, 0);
             return;
         }
@@ -662,4 +691,45 @@ public class AIHandler implements MessageHandler {
         }
     }
 
+    // ===== rate_limited 快速记忆查询（不发 LLM） =====
+
+    /** 判断消息是否含"你还记得..."这种记忆查询意图 */
+    private static boolean isMemoryQueryIntent(String text) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase();
+        for (String kw : MEMORY_QUERY_KEYWORDS) {
+            if (lower.contains(kw)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * rate_limited 快路径：调 DB 查 1 条最相关记忆，命中就生成短回复。
+     * 仅查 DB 不调 LLM，QPS 高也无所谓。
+     * @return 短回复文本；查不到或非查询类则返回 null（让上层走原沉默逻辑）
+     */
+    private String tryFastMemoryReply(String uid, String gid, String text) {
+        if (!isMemoryQueryIntent(text)) return null;
+        try {
+            String kw = null;
+            try {
+                List<String> kws = HanLP.extractKeyword(text, 3);
+                if (kws != null && !kws.isEmpty()) kw = kws.get(0);
+            } catch (Exception ignored) {}
+            java.util.List<LongTermMemory> results = memoryRepo.search(uid, gid, kw, 1, null, null);
+            if (results.isEmpty()) return null;
+            LongTermMemory m = results.get(0);
+            try { memoryRepo.markRecalled(m.getId()); } catch (Exception ignored) {}
+            // 用 MemoryInterpreter 翻译成叙事语言
+            MemoryRecall r = memoryInterpreter.interpret(m, null);
+            StringBuilder sb = new StringBuilder("记得");
+            if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) sb.append(r.stabilityHint());
+            sb.append(r.content());
+            if (r.ageText() != null && !r.ageText().isEmpty()) sb.append("（").append(r.ageText()).append("）");
+            return sb.toString();
+        } catch (Exception e) {
+            logger.debug("fast memory recall failed: {}", e.getMessage());
+            return null;
+        }
+    }
 }

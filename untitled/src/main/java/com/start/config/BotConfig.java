@@ -68,6 +68,9 @@ public class BotConfig {
     private static String webSearchUrl;
     private static String webSearchBackend;
 
+    /** 工作记忆默认过期时间（小时）。LLM 没传 expires_at 时用这个。 */
+    private static int workingMemoryDefaultExpireHours = 24;
+
     static {
         try (InputStream is = BotConfig.class.getClassLoader().getResourceAsStream("application.properties")) {
             if (is == null) {
@@ -139,6 +142,9 @@ public class BotConfig {
             auditBaseUrl = EnvResolver.resolve(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions").trim());
             auditModel = EnvResolver.resolve(props.getProperty("audit.model", "claude-sonnet-4-6").trim());
             auditTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("audit.timeout-ms", "30000")), 30000);
+
+            workingMemoryDefaultExpireHours = parseInt(
+                    EnvResolver.resolve(props.getProperty("working_memory.default_expire_hours", "24")), 24);
 
             logger.info("🤖 机器人 QQ: {}, 名字: {}", botQq, botName);
             logger.info("✅ WebSocket 地址: {}", wsUrl);
@@ -276,6 +282,10 @@ public class BotConfig {
 
     public static int getAgentMaxRetries() {
         return agentMaxRetries;
+    }
+
+    public static int getWorkingMemoryDefaultExpireHours() {
+        return workingMemoryDefaultExpireHours;
     }
 
     public static boolean isVisionEnabled() { return visionEnabled; }
