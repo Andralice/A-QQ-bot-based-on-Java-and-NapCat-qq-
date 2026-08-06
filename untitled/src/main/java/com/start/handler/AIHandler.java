@@ -264,7 +264,9 @@ public class AIHandler implements MessageHandler {
             String shortReply = tryFastMemoryReply(uid, gid, plainText);
             if (shortReply != null) {
                 lastGroupReplyTime.put(gid, now);
-                sendSplitGroupReplies(bot, groupId, shortReply);
+                // 第二阶段 2.2：传 sessionId 让 AI 回复与用户消息同 session
+                String fastSessionId = com.start.service.SessionId.groupConversation(gid, uid);
+                sendSplitGroupReplies(bot, groupId, shortReply, fastSessionId);
                 // 留痕：让后续 Interpreter 能识别到这条 ai_reply
                 // （否则 fast path 回复后的 3 分钟内，AI_COMMENTED 事件识别不到）
                 logDecision(gid, uid, result.event().name(), "REPLY", "memory_recall_fast", 0, 0, 0);
@@ -280,7 +282,8 @@ public class AIHandler implements MessageHandler {
             // 被动触发直接回复，不走 AI
             lastGroupReplyTime.put(gid, now);
             aiService.recordReaction(gid);
-            sendSplitGroupReplies(bot, groupId, result.directReply());
+            sendSplitGroupReplies(bot, groupId, result.directReply(),
+                    com.start.service.SessionId.groupConversation(gid, uid));
             conversationManager.remove(gid, uid);
             logDecision(gid, uid, result.event().name(), "REPLY", "direct", 0, 0, now - System.currentTimeMillis());
             return;
@@ -417,8 +420,9 @@ public class AIHandler implements MessageHandler {
             long elapsed = System.currentTimeMillis() - startMs;
 
             if (reply != null && !reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
-                sendSplitGroupReplies(bot, groupId, reply);
-                aiService.commitGeneration("group_" + groupId + "_" + userId, userId,
+                String groupSessionId = com.start.service.SessionId.groupConversation(gid, String.valueOf(userId));
+                sendSplitGroupReplies(bot, groupId, reply, groupSessionId);
+                aiService.commitGeneration(groupSessionId, String.valueOf(userId),
                         state.getMergedText(), reply, gid);
                 if (moodService != null) moodService.onBotSpeak(gid);
                 runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed, dc));
@@ -583,21 +587,23 @@ public class AIHandler implements MessageHandler {
 
             if (groupId != null) {
                 long gId = Long.parseLong(groupId);
-                sendSplitGroupReplies(bot, gId, reply);
+                // 第二阶段 2.2：传 sessionId 让 AI 回复写入与用户消息同 session
+                sendSplitGroupReplies(bot, gId, reply, sessionId);
 
                 String senderNick = originalMsg.path("sender").path("card").asText();
                 if (senderNick.isEmpty()) senderNick = originalMsg.path("sender").path("nickname").asText();
                 aiService.recordUserInteraction(groupId, userId, reply);
                 } else {
-                sendSplitPrivateReplies(bot, originalMsg, reply);
+                sendSplitPrivateReplies(bot, originalMsg, reply, sessionId);
             }
         });
     }
 
     /**
-     * 将 AI 回复拆分为多条短消息，并逐条发送（带打字延迟）
+     * 将 AI 回复拆分为多条短消息，并逐条发送（带打字延迟）。
+     * 第二阶段 2.2：传 sessionId，AI 回复写入与用户消息同一 session。
      */
-    private void sendSplitGroupReplies(Main bot, long groupId, String fullReply) {
+    private void sendSplitGroupReplies(Main bot, long groupId, String fullReply, String sessionId) {
         List<String> parts = aiService.splitIntoShortMessages(fullReply);
         for (int i = 0; i < parts.size(); i++) {
             String msg = parts.get(i).trim();
@@ -611,7 +617,7 @@ public class AIHandler implements MessageHandler {
                 return;
             }
 
-            bot.sendGroupReply(groupId, msg);
+            bot.sendGroupReply(groupId, msg, sessionId);
         }
     }
 
@@ -671,7 +677,7 @@ public class AIHandler implements MessageHandler {
     }
 
     /** 私聊同样拆分，避免一大段砸过去 */
-    private void sendSplitPrivateReplies(Main bot, JsonNode originalMsg, String fullReply) {
+    private void sendSplitPrivateReplies(Main bot, JsonNode originalMsg, String fullReply, String sessionId) {
         List<String> parts = aiService.splitIntoShortMessages(fullReply);
         for (int i = 0; i < parts.size(); i++) {
             String msg = parts.get(i).trim();
@@ -685,7 +691,7 @@ public class AIHandler implements MessageHandler {
                 return;
             }
 
-            bot.sendReply(originalMsg, msg);
+            bot.sendReply(originalMsg, msg, sessionId);
         }
     }
 

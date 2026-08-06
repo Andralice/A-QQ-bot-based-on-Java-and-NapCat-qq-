@@ -474,8 +474,31 @@ public class Main extends WebSocketClient {
 
     /**
      * 根据原始消息类型（群/私聊）自动选择发送方式。
+     *
+     * @deprecated 请使用 {@link #sendReply(JsonNode, String, String)} 显式传入 sessionId。
+     *             旧方法保留是为兼容：群场景下写入 group_*_bot sessionId（已有数据兼容）。
+     *             AI 对话应走 sendReply(msg, reply, sessionId) 重载。
      */
+    @Deprecated
     public boolean sendReply(JsonNode msg, String reply) {
+        // 旧行为：群写 group_{g}_bot，私聊写 private_{u}（与之前一致，保留兼容）
+        String legacySessionId;
+        if ("group".equals(msg.path("message_type").asText())) {
+            legacySessionId = com.start.service.SessionId.groupBotReply(
+                    String.valueOf(msg.path("group_id").asLong()));
+        } else {
+            legacySessionId = com.start.service.SessionId.privateChat(
+                    String.valueOf(msg.path("user_id").asLong()));
+        }
+        return sendReply(msg, reply, legacySessionId);
+    }
+
+    /**
+     * 第二阶段 2.2：发回复并显式指定 sessionId 持久化。
+     * AIHandler 在 replyWithAI 里拿到真实 sessionId 后调用此重载，
+     * 用户消息和 AI 回复写入同一个 session，getConversationContext 能查到完整对话。
+     */
+    public boolean sendReply(JsonNode msg, String reply, String sessionId) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
         logger.debug("📤 [{}] 发送回复，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
@@ -497,9 +520,6 @@ public class Main extends WebSocketClient {
             try {
                 if (this.messageService != null) {
                     boolean privateMessage = "private".equals(msgType);
-                    String sessionId = privateMessage
-                            ? "private_" + msg.path("user_id").asLong()
-                            : "group_" + msg.path("group_id").asLong() + "_bot";
                     String targetGroup = privateMessage ? null : String.valueOf(msg.path("group_id").asLong());
                     this.messageService.saveAIReply(sessionId, targetGroup, reply, null, privateMessage);
                 }
@@ -514,12 +534,23 @@ public class Main extends WebSocketClient {
         }
     }
 
+    @Deprecated
     public boolean sendPrivateReply(long userId, String reply) {
-        return sendPrivateReply(userId, 0, reply);
+        return sendPrivateReply(userId, reply, com.start.service.SessionId.privateChat(String.valueOf(userId)));
     }
 
-    /** 带 group_id 的私聊，非好友需要 group_id 建立临时会话 */
+    @Deprecated
     public boolean sendPrivateReply(long userId, long groupId, String reply) {
+        return sendPrivateReply(userId, groupId, reply, com.start.service.SessionId.privateChat(String.valueOf(userId)));
+    }
+
+    /** 第二阶段 2.2：发私聊并显式指定 sessionId 持久化 */
+    public boolean sendPrivateReply(long userId, String reply, String sessionId) {
+        return sendPrivateReply(userId, 0, reply, sessionId);
+    }
+
+    /** 第二阶段 2.2：发私聊并显式指定 sessionId 持久化（带 groupId 用于建立临时会话） */
+    public boolean sendPrivateReply(long userId, long groupId, String reply, String sessionId) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
         logger.debug("📤 [{}] 发送私聊，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
@@ -534,7 +565,7 @@ public class Main extends WebSocketClient {
             // ✅ 仅在 OneBot 确认送达后才持久化
             try {
                 if (this.messageService != null) {
-                    this.messageService.saveAIReply("private_" + userId, null, reply, null, true);
+                    this.messageService.saveAIReply(sessionId, null, reply, null, true);
                 }
             } catch (Exception e) {
                 logger.warn("私聊已发送，但消息持久化失败: {}", e.getMessage());
@@ -547,7 +578,13 @@ public class Main extends WebSocketClient {
         }
     }
 
+    @Deprecated
     public boolean sendGroupReply(long groupId, String reply) {
+        return sendGroupReply(groupId, reply, com.start.service.SessionId.groupBotReply(String.valueOf(groupId)));
+    }
+
+    /** 第二阶段 2.2：发群聊并显式指定 sessionId 持久化 */
+    public boolean sendGroupReply(long groupId, String reply, String sessionId) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
         logger.debug("📤 [{}] 发送群聊回复，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
@@ -558,10 +595,10 @@ public class Main extends WebSocketClient {
             if (!delivered) {
                 return false;
             }
-            // ✅ 仅在 OneBot 确认送达后才持久化，避免数据不一致
+            // ✅ 仅在 OneBot 确认送达后才持久化
             try {
                 if (this.messageService != null) {
-                    this.messageService.saveAIReply("group_" + groupId + "_bot",
+                    this.messageService.saveAIReply(sessionId,
                             String.valueOf(groupId), reply, null, false);
                 }
             } catch (Exception e) {
