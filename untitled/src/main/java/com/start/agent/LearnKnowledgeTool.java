@@ -1,6 +1,7 @@
 package com.start.agent;
 
 import com.start.service.KeywordKnowledgeService;
+import com.start.service.ToolAuthorizationService;
 
 import java.util.*;
 
@@ -45,24 +46,23 @@ public class LearnKnowledgeTool implements Tool {
         String action = (String) args.get("action");
         if (action == null) return "缺少 action 参数";
 
-        boolean isAdmin = realUserId != null
-                && realUserId.equals(String.valueOf(com.start.config.BotConfig.getAdminQq()));
+        // 第三阶段 3.1：集中授权检查（黑名单 + admin 分级）
+        // update / delete / blacklist_remove 需要 admin；add / blacklist_list 只需非黑名单
+        boolean adminRequired = action.equals("update")
+                || action.equals("delete")
+                || action.equals("blacklist_remove");
+        ToolAuthorizationService.AuthorizationResult authCheck =
+                ToolAuthorizationService.getInstance().checkKnowledgeMutation(realUserId, adminRequired);
+        if (!authCheck.allowed) {
+            return authCheck.reason;
+        }
 
         return switch (action) {
             case "add" -> doAdd(args);
-            case "update" -> {
-                if (!isAdmin) yield "只有归儿才能修改知识库哦~";
-                yield doUpdate(args);
-            }
-            case "delete" -> {
-                if (!isAdmin) yield "只有归儿才能删除知识库哦~";
-                yield doDelete(args);
-            }
+            case "update" -> doUpdate(args);
+            case "delete" -> doDelete(args);
             case "blacklist_list" -> doBlacklistList();
-            case "blacklist_remove" -> {
-                if (!isAdmin) yield "只有归儿才能移除黑名单哦~";
-                yield doBlacklistRemove(args);
-            }
+            case "blacklist_remove" -> doBlacklistRemove(args);
             default -> "未知操作: " + action + "，支持 add/update/delete/blacklist_list/blacklist_remove";
         };
     }

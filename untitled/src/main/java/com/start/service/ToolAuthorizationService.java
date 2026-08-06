@@ -140,13 +140,14 @@ public class ToolAuthorizationService {
 
     /**
      * 知识库管理授权检查。requireAdmin=true 时要求调用者是管理员。
+     * 检查顺序：先黑名单后 admin（黑名单优先）。
      */
     public AuthorizationResult checkKnowledgeMutation(String callerUserId, boolean requireAdmin) {
-        if (requireAdmin && !isAdmin(callerUserId)) {
-            return AuthorizationResult.deny("只有归儿才能修改知识库");
-        }
         if (isBlacklistedPrivate(callerUserId)) {
             return AuthorizationResult.deny("你已被限制使用此功能");
+        }
+        if (requireAdmin && !isAdmin(callerUserId)) {
+            return AuthorizationResult.deny("只有归儿才能修改知识库");
         }
         return AuthorizationResult.allow();
     }
