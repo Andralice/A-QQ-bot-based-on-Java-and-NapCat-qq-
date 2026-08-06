@@ -98,6 +98,23 @@ class MessageServiceContextIntegrationTest {
     }
 
     @Test
+    void aiHandlerFallbackRepliesStayInUserSession() {
+        // 第二阶段 2.2 回归测试：fallback（"刚刚走神了" / "稍等一下"）应写入 user session
+        // 修复前 fallback 走 group_*_bot session，会脱离用户对话上下文
+        // 修复后 fallback 走 user session，保留完整对话流
+        messageService.saveUserMessage(testSession, testUser, testGroup,
+                "今天吃什么好", false);
+        // 模拟"刚刚走神了"fallback 写 user session
+        messageService.saveAIReply(testSession, testGroup,
+                "刚刚走神了，再说一遍？", null, false);
+
+        String ctx = messageService.getConversationContext(testSession, 10);
+        assertTrue(ctx.contains("今天吃什么好"), "用户消息应在 user session");
+        assertTrue(ctx.contains("刚刚走神了"),
+                "fallback 也应写入 user session（修复后），实际=" + ctx);
+    }
+
+    @Test
     void privateChatSessionUnchangedBehavior() {
         // 私聊：用户消息和 AI 回复都用 private_{u}，修复前后一致
         String privateSession = SessionId.privateChat(testUser);

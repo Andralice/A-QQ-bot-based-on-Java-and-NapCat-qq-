@@ -419,15 +419,15 @@ public class AIHandler implements MessageHandler {
             String reply = genResult != null ? genResult.reply() : "";
             long elapsed = System.currentTimeMillis() - startMs;
 
+            String groupSessionId = com.start.service.SessionId.groupConversation(gid, String.valueOf(userId));
             if (reply != null && !reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
-                String groupSessionId = com.start.service.SessionId.groupConversation(gid, String.valueOf(userId));
                 sendSplitGroupReplies(bot, groupId, reply, groupSessionId);
                 aiService.commitGeneration(groupSessionId, String.valueOf(userId),
                         state.getMergedText(), reply, gid);
                 if (moodService != null) moodService.onBotSpeak(gid);
                 runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed, dc));
             } else {
-                bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
+                bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？", groupSessionId);
                 logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
                         "REPLY", "fallback", genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
             }
@@ -581,7 +581,7 @@ public class AIHandler implements MessageHandler {
             String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds);
 
             if (reply == null || reply.trim().isEmpty()) {
-                bot.sendReply(originalMsg, "稍等一下，我在走神...");
+                bot.sendReply(originalMsg, "稍等一下，我在走神...", sessionId);
                 return;
             }
 
