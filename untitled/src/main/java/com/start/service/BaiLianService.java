@@ -277,6 +277,7 @@ public class BaiLianService {
     final Map<String, Deque<ContextEvent>> groupContexts = new ConcurrentHashMap<>();
     private final ThreadLocal<String> pendingImageData = new ThreadLocal<>(); // AIHandler 设置图片数据，generate() 消费
     private final ThreadLocal<Boolean> suppressSessionWrite = ThreadLocal.withInitial(() -> false); // PR4: 控制 generate() 是否写 sessions
+    private final ThreadLocal<String> deferredImgData = new ThreadLocal<>(); // PR4: 延迟提交的图片数据，由 commitGeneration() 消费
 
     /** 待处理文件缓存 — key = sessionKey(group_xxx_yyy / private_xxx), value = 文件元数据列表 */
     private final Map<String, List<Map<String, String>>> pendingFiles = new ConcurrentHashMap<>();
@@ -432,6 +433,15 @@ public class BaiLianService {
      */
     public void commitGeneration(String sessionId, String userId, String userPrompt,
                                   String reply, String groupId) {
+        // PR4: 读出延迟提交的图片数据
+        String imgData = deferredImgData.get();
+        deferredImgData.remove();
+        if (imgData != null && !imgData.isEmpty()) {
+            aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, 1L, imgData);
+        } else {
+            aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, 1L);
+        }
+
         List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
         synchronized (history) {
             if (lastClearTime.containsKey(sessionId)) {
@@ -579,8 +589,17 @@ public class BaiLianService {
 
         try {
             Long isagent = 1L;
+            String imgData = pendingImageData.get();
             pendingImageData.remove();
             boolean suppress = suppressSessionWrite.get();
+            if (suppress) {
+                // PR4: 延迟提交时把图片数据保留到 deferredImgData，由 commitGeneration() 消费
+                deferredImgData.set(imgData);
+            } else if (imgData != null && !imgData.isEmpty()) {
+                aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, isagent, imgData);
+            } else {
+                aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, isagent);
+            }
 
             List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
 

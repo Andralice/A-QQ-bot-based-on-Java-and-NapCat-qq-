@@ -1,10 +1,15 @@
 package com.start.service;
 
+import com.hankcs.hanlp.HanLP;
 import com.start.model.ChatMessage;
 import com.start.repository.MessageRepository;
 import com.start.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 消息服务类
@@ -18,6 +23,7 @@ import java.util.*;
  * </p>
  */
 public class MessageService {
+    private static final Logger logger = LoggerFactory.getLogger(MessageService.class);
     private final MessageRepository messageRepo;
     private final UserRepository userRepo;
 
@@ -104,9 +110,27 @@ public class MessageService {
         return 0;
     }
 
+    /**
+     * 提取消息话题标签：HanLP 关键词提取，最多 3 个；失败时回退到截断前 20 字符。
+     * 模式参考 ThreadManager.extractTopic。
+     */
     private String extractTopics(String content) {
-        Set<String> topics = new HashSet<>();
-        // ... 话题提取逻辑
-        return String.join(",", topics);
+        if (content == null || content.isBlank()) return "";
+        try {
+            String clean = content.replaceAll("[\\p{Punct}\\s]+", " ").trim();
+            if (clean.isEmpty()) return "";
+            List<String> kw = HanLP.extractKeyword(clean, 3);
+            if (kw != null && !kw.isEmpty()) {
+                return kw.stream()
+                        .filter(k -> k != null && !k.isBlank())
+                        .limit(3)
+                        .collect(Collectors.joining(","));
+            }
+        } catch (Exception e) {
+            logger.debug("HanLP 话题提取失败: {}", e.getMessage());
+        }
+        // 回退：截断前 20 字符
+        String trimmed = content.replaceAll("\\s+", " ").trim();
+        return trimmed.length() > 20 ? trimmed.substring(0, 20) : trimmed;
     }
 }
