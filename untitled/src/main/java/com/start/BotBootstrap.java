@@ -15,6 +15,7 @@ import com.start.service.ConversationMetrics;
 import com.start.model.RecurringTask;
 import com.start.repository.*;
 import com.start.service.*;
+import static com.start.service.ScheduleExecutor.executeDueEvent;
 import com.start.util.DatabaseErrorHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -190,49 +191,20 @@ public final class BotBootstrap {
                     List<LongTermMemory> dueEvents = bot.longTermMemoryRepo.findDueEvents();
                     for (LongTermMemory event : dueEvents) {
                         try {
-                            if (!bot.longTermMemoryRepo.claimDueEvent(event.getId())) {
-                                continue;
-                            }
                             String prompt = "你之前记下了一个定时事件：\"" + event.getContent()
                                     + "\"\n涉及用户：" + event.getUserId()
                                     + "\n现在时间到了，请自然地提醒或祝福。";
-                            Runnable trigger = () -> {
-                                String reply = bot.baiLianService.generate(
-                                        "event_" + event.getId(),
-                                        event.getUserId(),
-                                        prompt,
-                                        event.getGroupId(),
-                                        "糖果熊"
-                                );
-                                boolean delivered = reply == null || reply.trim().isEmpty();
-                                if (reply != null && !reply.trim().isEmpty()) {
-                                    if (event.getGroupId() != null && !event.getGroupId().isBlank()) {
-                                        delivered = bot.sendGroupReply(Long.parseLong(event.getGroupId()), reply);
-                                    } else {
-                                        delivered = bot.sendPrivateReply(Long.parseLong(event.getUserId()), reply);
-                                    }
-                                }
-                                if (!delivered) {
-                                    logger.warn("定时事件消息发送失败，保留事件待下次重试 id={}", event.getId());
-                                    try {
-                                        bot.longTermMemoryRepo.releaseEventClaim(event.getId());
-                                    } catch (SQLException releaseError) {
-                                        logger.error("释放定时事件租约失败 id={}: {}", event.getId(), releaseError.getMessage(), releaseError);
-                                    }
-                                    return;
-                                }
-                                try {
-                                    bot.longTermMemoryRepo.markTriggered(event.getId());
-                                } catch (SQLException e) {
-                                    logger.error("定时事件状态更新失败 id={}: {}", event.getId(), e.getMessage(), e);
-                                    try {
-                                        bot.longTermMemoryRepo.releaseEventClaim(event.getId());
-                                    } catch (SQLException releaseError) {
-                                        logger.error("释放定时事件租约失败 id={}: {}", event.getId(), releaseError.getMessage(), releaseError);
-                                    }
-                                }
-                                logger.info("定时事件已触发: {} -> {}", event.getContent(), event.getGroupId());
-                            };
+                            Runnable trigger = () -> executeDueEvent(
+                                    bot.longTermMemoryRepo,
+                                    event,
+                                    () -> bot.baiLianService.generate(
+                                            "event_" + event.getId(),
+                                            event.getUserId(),
+                                            prompt,
+                                            event.getGroupId(),
+                                            "糖果熊"),
+                                    bot::sendGroupReply,
+                                    bot::sendPrivateReply);
                             if (bot.conversationExecutor != null) {
                                 bot.conversationExecutor.execute(event.getGroupId(), trigger);
                             } else {
@@ -264,48 +236,20 @@ public final class BotBootstrap {
                     List<RecurringTask> dueTasks = bot.recurringTaskRepo.findDueTasks();
                     for (RecurringTask task : dueTasks) {
                         try {
-                            if (!bot.recurringTaskRepo.claimDueTask(task.getId())) {
-                                continue;
-                            }
                             logger.info("周期任务触发: {} (id={})", task.getTaskName(), task.getId());
                             String sessionId = "recurring_" + task.getId() + "_" + System.currentTimeMillis();
-                            Runnable fire = () -> {
-                                String reply = bot.baiLianService.generate(
-                                        sessionId,
-                                        task.getUserId(),
-                                        task.getTriggerPrompt(),
-                                        task.getGroupId(),
-                                        "糖果熊"
-                                );
-                                boolean delivered = reply == null || reply.trim().isEmpty();
-                                if (reply != null && !reply.trim().isEmpty()) {
-                                    if (task.getGroupId() != null && !task.getGroupId().isBlank()) {
-                                        delivered = bot.sendGroupReply(Long.parseLong(task.getGroupId()), reply);
-                                    } else {
-                                        delivered = bot.sendPrivateReply(Long.parseLong(task.getUserId()), reply);
-                                    }
-                                }
-                                if (!delivered) {
-                                    logger.warn("周期任务消息发送失败，保留任务待下次重试 id={}", task.getId());
-                                    try {
-                                        bot.recurringTaskRepo.releaseTaskClaim(task.getId());
-                                    } catch (SQLException releaseError) {
-                                        logger.error("释放周期任务租约失败 id={}: {}", task.getId(), releaseError.getMessage(), releaseError);
-                                    }
-                                    return;
-                                }
-                                LocalDateTime nextFire = Main.computeNextFireFromCron(task.getCronExpr());
-                                try {
-                                    bot.recurringTaskRepo.markFired(task.getId(), nextFire);
-                                } catch (SQLException e) {
-                                    logger.error("周期任务状态更新失败 id={}: {}", task.getId(), e.getMessage(), e);
-                                    try {
-                                        bot.recurringTaskRepo.releaseTaskClaim(task.getId());
-                                    } catch (SQLException releaseError) {
-                                        logger.error("释放周期任务租约失败 id={}: {}", task.getId(), releaseError.getMessage(), releaseError);
-                                    }
-                                }
-                            };
+                            Runnable fire = () -> ScheduleExecutor.executeDueTask(
+                                    bot.recurringTaskRepo,
+                                    task,
+                                    () -> bot.baiLianService.generate(
+                                            sessionId,
+                                            task.getUserId(),
+                                            task.getTriggerPrompt(),
+                                            task.getGroupId(),
+                                            "糖果熊"),
+                                    bot::sendGroupReply,
+                                    bot::sendPrivateReply,
+                                    () -> Main.computeNextFireFromCron(task.getCronExpr()));
                             if (bot.conversationExecutor != null) {
                                 bot.conversationExecutor.execute(task.getGroupId(), fire);
                             } else {
