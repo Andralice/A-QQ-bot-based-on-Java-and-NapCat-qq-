@@ -22,7 +22,9 @@ import org.slf4j.LoggerFactory;
 
 import java.time.LocalDateTime;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 服务装配与后台任务启动器。
@@ -129,21 +131,64 @@ public final class BotBootstrap {
     }
 
     /**
-     * 启动前快速检查：缺关键配置直接拒绝启动。
-     * 比启动后才发现 "BAILIAN_API_KEY 缺失" 提前暴露问题（5.1 启动自检）。
+     * 启动前快速检查：缺关键配置直接拒绝启动（5.1 启动自检）。
+     * <p>
+     * 注意：BotConfig 静态初始化阶段已经把未替换的 ${VAR} 占位符 fallback 为空值 / 0，
+     * 不会在这里之前抛 NumberFormatException。所有"必填项缺失"的判断集中在这里，
+     * 并列出每一项，方便部署时一眼看出少配了什么。
      */
     private static void preflightCheck() {
-        String apiKey = BotConfig.getBaiLianApiKey();
-        if (apiKey == null || apiKey.isBlank()) {
-            throw new IllegalStateException("启动失败：BAILIAN_API_KEY 未配置（检查 application.properties）");
-        }
-        String wsUrl = BotConfig.getWsUrl();
-        if (wsUrl == null || wsUrl.isBlank()) {
-            throw new IllegalStateException("启动失败：NAPCAT_WS_URL 未配置");
+        List<String> missing = collectMissingConfigs(
+                BotConfig.getBotQq(),
+                BotConfig.getBaiLianApiKey(),
+                BotConfig.getWsUrl(),
+                BotConfig.getAllowedGroups(),
+                BotConfig.isPrivateWhitelistEnabled(),
+                BotConfig.getAllowedPrivateUsers());
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException(
+                    "启动失败：缺少必需环境变量/配置：\n  - "
+                            + String.join("\n  - ", missing)
+                            + "\n请在 application.properties 中配置或通过环境变量注入（参考 .env 模板）。");
         }
         // 数据库连接 + 迁移在 DatabaseConfig.initConnectionPool 内部已检查
         // Dashboard 鉴权在 WebDashboardListener.start() 内部已检查
-        logger.info("✅ 启动自检通过（BAILIAN_API_KEY / WS_URL 已配置）");
+        logger.info("✅ 启动自检通过（bot.qq + BAILIAN_API_KEY + WS_URL + ALLOWED_GROUPS 全部已配置）");
+    }
+
+    /**
+     * 必填配置检查（纯函数，方便测试）。
+     * 缺哪项就在 missing 列表里加一项人类可读的描述。
+     *
+     * <p>参数全部从 BotConfig 读取，但签名上只依赖基本类型 + Set，
+     * 不耦合 BotConfig 静态状态，可以传 mock snapshot 验证。
+     */
+    static List<String> collectMissingConfigs(
+            long botQq,
+            String baiLianApiKey,
+            String wsUrl,
+            Set<Long> allowedGroups,
+            boolean privateWhitelistEnabled,
+            Set<Long> allowedPrivateUsers) {
+        List<String> missing = new ArrayList<>();
+        if (botQq <= 0L) {
+            missing.add("BOT_QQ（机器人 QQ 号，application.properties: bot.qq）");
+        }
+        if (baiLianApiKey == null || baiLianApiKey.isBlank()) {
+            missing.add("BAILIAN_API_KEY（百炼 AI API Key，application.properties: bailian.api-key）");
+        }
+        if (wsUrl == null || wsUrl.isBlank()) {
+            missing.add("NAPCT_WS_URL（NapCat WebSocket 地址，application.properties: ws.url）");
+        }
+        if (allowedGroups == null || allowedGroups.isEmpty()) {
+            missing.add("ALLOWED_GROUPS（允许的群号列表，application.properties: allowed.groups）");
+        }
+        // ALLOWED_PRIVATE_USERS 仅在私聊白名单开启时才是必填；
+        // 默认 private.whitelist.enabled=false 时不检查，避免破坏现有 dev 流程。
+        if (privateWhitelistEnabled && (allowedPrivateUsers == null || allowedPrivateUsers.isEmpty())) {
+            missing.add("ALLOWED_PRIVATE_USERS（私聊白名单用户列表，启用 private.whitelist.enabled=true 时必填）");
+        }
+        return missing;
     }
 
     private static void startDashboard(Main bot) {

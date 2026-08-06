@@ -82,69 +82,73 @@ public class BotConfig {
             props.load(new InputStreamReader(is, StandardCharsets.UTF_8));
 
             // 读取配置
-            String qqStr = props.getProperty("bot.qq");
-            if (qqStr == null || qqStr.trim().isEmpty()) {
-                throw new RuntimeException("❌ 请配置 bot.qq");
+            // 5.1 启动链路：BotConfig 静态初始化阶段遇到未替换的 ${VAR} 一律 fallback，
+            // 避免在 Main.<clinit> 之前就抛 NumberFormatException 把 preflightCheck 跳过。
+            // 真正"必填项缺失"的判断统一推迟到 BotBootstrap.preflightCheck()，由它列出所有缺失项后失败退出。
+            String qqStr = resolveOrEmpty(props.getProperty("bot.qq", ""));
+            if (qqStr.isEmpty()) {
+                logger.warn("⚠️ bot.qq 未配置（BOT_QQ 环境变量缺失或未设置），preflightCheck 阶段会拒绝启动");
+                botQq = 0;
+            } else {
+                botQq = Long.parseLong(qqStr);
             }
-            botQq = Long.parseLong(EnvResolver.resolve(qqStr.trim()));
-            adminQq = Long.parseLong(EnvResolver.resolve(props.getProperty("admin.qq", "0").trim()));
-            oneBotHttpBaseUrl = EnvResolver.resolve(props.getProperty("onebot.http-base-url", "http://127.0.0.1:5700").trim());
-            wsBaseUrl = EnvResolver.resolve(props.getProperty("ws.base.url", "ws://127.0.0.1:5700").trim());
-            wsUrl = EnvResolver.resolve(props.getProperty("ws.url", wsBaseUrl).trim());
-            oneBotAccessToken = EnvResolver.resolve(props.getProperty("onebot.access-token", "").trim());
+            adminQq = parseLongSafe(resolveOrEmpty(props.getProperty("admin.qq", "0")), 0L);
+            oneBotHttpBaseUrl = resolveOrEmpty(props.getProperty("onebot.http-base-url", "http://127.0.0.1:5700"));
+            wsBaseUrl = resolveOrEmpty(props.getProperty("ws.base.url", "ws://127.0.0.1:5700"));
+            wsUrl = resolveOrEmpty(props.getProperty("ws.url", wsBaseUrl));
+            oneBotAccessToken = resolveOrEmpty(props.getProperty("onebot.access-token", ""));
             botName = props.getProperty("bot.name", "糖果熊").trim();
-            String enabledStr = EnvResolver.resolve(props.getProperty("private.whitelist.enabled", "false").trim());
-            privateWhitelistEnabled = Boolean.parseBoolean(enabledStr);
-            ALLOWED_GROUPS = parseLongSet(EnvResolver.resolve(props.getProperty("allowed.groups", "")));
-            ALLOWED_PRIVATE_USERS = parseLongSet(EnvResolver.resolve(props.getProperty("allowed.private.users", "")));
-            PRIVATE_BLACKLIST = parseLongSet(EnvResolver.resolve(props.getProperty("private.blacklist", "")));
+            privateWhitelistEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("private.whitelist.enabled", "false")));
+            ALLOWED_GROUPS = parseLongSet(resolveOrEmpty(props.getProperty("allowed.groups", "")));
+            ALLOWED_PRIVATE_USERS = parseLongSet(resolveOrEmpty(props.getProperty("allowed.private.users", "")));
+            PRIVATE_BLACKLIST = parseLongSet(resolveOrEmpty(props.getProperty("private.blacklist", "")));
 
-            baiLianApiKey = EnvResolver.resolve(props.getProperty("bailian.api-key", EnvResolver.resolve(props.getProperty("dashscope.api-key", ""))).trim());
-            baiLianBaseUrl = EnvResolver.resolve(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
-            baiLianChatModel = EnvResolver.resolve(props.getProperty("bailian.chat-model", "deepseek-v4-pro").trim());
-            baiLianTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("bailian.timeout-ms", "90000")), 90000);
-            baiLianMaxRetries = parseInt(EnvResolver.resolve(props.getProperty("bailian.max-retries", "2")), 2);
+            baiLianApiKey = resolveOrEmpty(props.getProperty("bailian.api-key", props.getProperty("dashscope.api-key", "")));
+            baiLianBaseUrl = resolveOrEmpty(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions"));
+            baiLianChatModel = resolveOrEmpty(props.getProperty("bailian.chat-model", "deepseek-v4-pro"));
+            baiLianTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("bailian.timeout-ms", "90000")), 90000);
+            baiLianMaxRetries = parseInt(resolveOrEmpty(props.getProperty("bailian.max-retries", "2")), 2);
 
-            agentApiKey = EnvResolver.resolve(props.getProperty("agent.api-key", "").trim());
-            agentBaseUrl = EnvResolver.resolve(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
-            agentModel = EnvResolver.resolve(props.getProperty("agent.model", "deepseek-v4-pro").trim());
-            agentTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("agent.timeout-ms", "90000")), 90000);
-            agentMaxRetries = parseInt(EnvResolver.resolve(props.getProperty("agent.max-retries", "2")), 2);
+            agentApiKey = resolveOrEmpty(props.getProperty("agent.api-key", ""));
+            agentBaseUrl = resolveOrEmpty(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions"));
+            agentModel = resolveOrEmpty(props.getProperty("agent.model", "deepseek-v4-pro"));
+            agentTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("agent.timeout-ms", "90000")), 90000);
+            agentMaxRetries = parseInt(resolveOrEmpty(props.getProperty("agent.max-retries", "2")), 2);
 
-            visionEnabled = Boolean.parseBoolean(EnvResolver.resolve(props.getProperty("vision.enabled", "true")));
-            visionApiKey = EnvResolver.resolve(props.getProperty("vision.api-key", baiLianApiKey).trim());
-            visionBaseUrl = EnvResolver.resolve(props.getProperty("vision.base-url", baiLianBaseUrl).trim());
-            visionModel = EnvResolver.resolve(props.getProperty("vision.model", "qwen-vl-max").trim());
-            visionTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("vision.timeout-ms", "60000")), 60000);
+            visionEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("vision.enabled", "true")));
+            visionApiKey = resolveOrEmpty(props.getProperty("vision.api-key", baiLianApiKey));
+            visionBaseUrl = resolveOrEmpty(props.getProperty("vision.base-url", baiLianBaseUrl));
+            visionModel = resolveOrEmpty(props.getProperty("vision.model", "qwen-vl-max"));
+            visionTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("vision.timeout-ms", "60000")), 60000);
 
-            ttsBaseUrl = EnvResolver.resolve(props.getProperty("tts.base-url", "http://127.0.0.1:8765").trim());
-            ttsDefaultVoice = EnvResolver.resolve(props.getProperty("tts.default-voice", "tangguoxiong").trim());
-            ttsAudioFormat = EnvResolver.resolve(props.getProperty("tts.audio-format", "mp3").trim());
-            ttsTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("tts.timeout-ms", "30000")), 30000);
-            ttsOutputDir = EnvResolver.resolve(props.getProperty("tts.output-dir", "/opt/qq-bot/tts/output").trim());
-            ttsMaxRetries = parseInt(EnvResolver.resolve(props.getProperty("tts.max-retries", "2")), 2);
+            ttsBaseUrl = resolveOrEmpty(props.getProperty("tts.base-url", "http://127.0.0.1:8765"));
+            ttsDefaultVoice = resolveOrEmpty(props.getProperty("tts.default-voice", "tangguoxiong"));
+            ttsAudioFormat = resolveOrEmpty(props.getProperty("tts.audio-format", "mp3"));
+            ttsTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("tts.timeout-ms", "30000")), 30000);
+            ttsOutputDir = resolveOrEmpty(props.getProperty("tts.output-dir", "/opt/qq-bot/tts/output"));
+            ttsMaxRetries = parseInt(resolveOrEmpty(props.getProperty("tts.max-retries", "2")), 2);
 
-            merchantApiBaseUrl = EnvResolver.resolve(props.getProperty("merchant.api.base-url", "https://wegame.shallow.ink"));
-            merchantApiKey = EnvResolver.resolve(props.getProperty("merchant.api.key", ""));
-            merchantNotifyEnabled = Boolean.parseBoolean(EnvResolver.resolve(props.getProperty("merchant.notify.enabled", "true")));
-            merchantNotifyGroups = parseLongSet(EnvResolver.resolve(props.getProperty("merchant.notify.groups", "")));
+            merchantApiBaseUrl = resolveOrEmpty(props.getProperty("merchant.api.base-url", "https://wegame.shallow.ink"));
+            merchantApiKey = resolveOrEmpty(props.getProperty("merchant.api.key", ""));
+            merchantNotifyEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("merchant.notify.enabled", "true")));
+            merchantNotifyGroups = parseLongSet(resolveOrEmpty(props.getProperty("merchant.notify.groups", "")));
             if (merchantNotifyGroups.isEmpty()) {
                 merchantNotifyGroups = ALLOWED_GROUPS;
             }
-            merchantNotifyQqs = parseLongSet(EnvResolver.resolve(props.getProperty("merchant.notify.qqs", "")));
-            merchantHighValueItems = parseStringSet(EnvResolver.resolve(props.getProperty("merchant.high-value-items", "国王球,炫彩精灵蛋,首领血脉,棱镜球")));
+            merchantNotifyQqs = parseLongSet(resolveOrEmpty(props.getProperty("merchant.notify.qqs", "")));
+            merchantHighValueItems = parseStringSet(resolveOrEmpty(props.getProperty("merchant.high-value-items", "国王球,炫彩精灵蛋,首领血脉,棱镜球")));
 
-            httpConnectTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
-            webSearchUrl = EnvResolver.resolve(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
-            webSearchBackend = EnvResolver.resolve(props.getProperty("web.search.backend", "bing"));
+            httpConnectTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
+            webSearchUrl = resolveOrEmpty(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
+            webSearchBackend = resolveOrEmpty(props.getProperty("web.search.backend", "bing"));
 
-            auditApiKey = EnvResolver.resolve(props.getProperty("audit.api-key", "").trim());
-            auditBaseUrl = EnvResolver.resolve(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions").trim());
-            auditModel = EnvResolver.resolve(props.getProperty("audit.model", "claude-sonnet-4-6").trim());
-            auditTimeoutMs = parseInt(EnvResolver.resolve(props.getProperty("audit.timeout-ms", "30000")), 30000);
+            auditApiKey = resolveOrEmpty(props.getProperty("audit.api-key", ""));
+            auditBaseUrl = resolveOrEmpty(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions"));
+            auditModel = resolveOrEmpty(props.getProperty("audit.model", "claude-sonnet-4-6"));
+            auditTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("audit.timeout-ms", "30000")), 30000);
 
             workingMemoryDefaultExpireHours = parseInt(
-                    EnvResolver.resolve(props.getProperty("working_memory.default_expire_hours", "24")), 24);
+                    resolveOrEmpty(props.getProperty("working_memory.default_expire_hours", "24")), 24);
 
             logger.info("🤖 机器人 QQ: {}, 名字: {}", botQq, botName);
             logger.info("✅ WebSocket 地址: {}", wsUrl);
@@ -163,31 +167,87 @@ public class BotConfig {
         }
     }
 
+    /**
+     * 判定字符串是否为未替换的 ${ENV_VAR} 占位符。
+     * 当环境变量缺失且 application.properties 中没有默认值时，EnvResolver 会原样返回 ${...}。
+     * BotConfig 静态初始化阶段把这种情况当作"未配置"，不让它一路传到 Long.parseLong / parseInt 炸出 NumberFormatException，
+     * 把真正的失败推迟到 preflightCheck 统一报告。
+     *
+     * <p>包内可见，方便测试和 BotBootstrap 复用判定逻辑。
+     */
+    static boolean isUnresolvedPlaceholder(String value) {
+        if (value == null) return false;
+        String trimmed = value.trim();
+        return trimmed.startsWith("${") && trimmed.endsWith("}")
+                && trimmed.length() >= 3;
+    }
+
+    /**
+     * 解析 env 占位符；如果仍是 ${...} 未替换，返回空字符串而不是占位符原串。
+     * 用于 BotConfig 静态初始化阶段所有 string 字段，保证 Main.&lt;clinit&gt; 不会因
+     * NumberFormatException 把后续 preflightCheck 跳过。
+     */
+    private static String resolveOrEmpty(String value) {
+        if (value == null) return "";
+        String resolved = EnvResolver.resolve(value);
+        if (resolved == null || isUnresolvedPlaceholder(resolved)) {
+            return "";
+        }
+        return resolved.trim();
+    }
+
     private static int parseInt(String value, int defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty() || isUnresolvedPlaceholder(trimmed)) {
+            return defaultValue;
+        }
         try {
-            return Integer.parseInt(value.trim());
+            return Integer.parseInt(trimmed);
         } catch (NumberFormatException e) {
             return defaultValue;
         }
     }
 
-    private static Set<Long> parseLongSet(String value) {
+    /**
+     * 解析为 long 集合。占位符元素（${VAR}）会被过滤，避免 BotConfig 静态初始化阶段抛 NumberFormatException。
+     * 整个 value 是 ${...} 时也返回空集，preflightCheck 会把它判为"未配置"。
+     */
+    static Set<Long> parseLongSet(String value) {
         if (value == null || value.trim().isEmpty()) {
             return Collections.emptySet();
         }
-        return Arrays.stream(value.split(","))
+        String trimmed = value.trim();
+        if (isUnresolvedPlaceholder(trimmed)) {
+            return Collections.emptySet();
+        }
+        return Arrays.stream(trimmed.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
+                .filter(s -> !isUnresolvedPlaceholder(s))
                 .map(Long::parseLong)
                 .collect(Collectors.toSet());
     }
 
-    private static long parseLongSafe(String value) {
-        if (value == null || value.trim().isEmpty()) return 0;
+    /**
+     * 解析为 long。空 / 占位符 / 解析失败时返回 defaultValue，BotConfig 静态初始化阶段不抛异常。
+     * 失败的字段在 preflightCheck 统一报错。
+     */
+    static long parseLongSafe(String value, long defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty() || isUnresolvedPlaceholder(trimmed)) {
+            return defaultValue;
+        }
         try {
-            return Long.parseLong(value.trim());
+            return Long.parseLong(trimmed);
         } catch (NumberFormatException e) {
-            return 0;
+            logger.warn("⚠️ 配置值无法解析为 long: '{}', 使用默认值 {}", trimmed, defaultValue);
+            return defaultValue;
         }
     }
 
