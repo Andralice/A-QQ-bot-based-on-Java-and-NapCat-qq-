@@ -1,13 +1,15 @@
 package com.start.agent;
 
 import com.start.Main;
-import com.start.config.BotConfig;
+import com.start.service.ToolAuthorizationService;
 
 import java.util.Arrays;
 import java.util.Map;
 
 /**
  * 发送私聊消息工具。用于游戏分发词语等场景。
+ *
+ * 第三阶段 3.1 改造：黑名单/限流检查改由 ToolAuthorizationService 集中处理。
  */
 public class SendPrivateTool implements Tool {
     private final Main bot;
@@ -46,14 +48,12 @@ public class SendPrivateTool implements Tool {
         String userId = (String) args.get("user_id");
         String message = (String) args.get("message");
         String groupId = (String) args.get("group_id");
-        // 黑名单检查：黑名单用户不能指挥糖果熊私聊别人
-        try {
-            long rid = Long.parseLong(realUserId);
-            if (BotConfig.getPrivateBlacklist().contains(rid)) {
-                return "私聊功能不可用：你已被限制使用此功能";
-            }
-        } catch (NumberFormatException e) {
-            return "无法确定发起者身份";
+
+        // 集中授权检查（黑名单 + 限流）
+        ToolAuthorizationService.AuthorizationResult auth =
+                ToolAuthorizationService.getInstance().checkPrivateSend(userId, message, realUserId);
+        if (!auth.allowed) {
+            return auth.reason;
         }
 
         if (userId == null || message == null) return "缺少 user_id 或 message";

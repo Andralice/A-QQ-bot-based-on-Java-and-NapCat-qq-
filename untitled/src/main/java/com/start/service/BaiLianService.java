@@ -827,7 +827,7 @@ public class BaiLianService {
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService, userId),
-                    new SendGroupTool(botInstance),
+                    new SendGroupTool(botInstance, userId),
                     new SendFileTool(botInstance),
                     new QueryFileTool(botInstance, this, userId, sessionId),
                     new SearchHistoryTool(ltmRepo),
@@ -1052,8 +1052,17 @@ public class BaiLianService {
                             throw e;
                         }
                         long latency = System.currentTimeMillis() - execStart;
+                        // 第三阶段 3.3：启发式判断 rejected。
+                        // 工具在权限/限流被拒时返回的中文提示以"拒绝"/"不可用"/"超限"等开头
+                        boolean rejected = result != null && (
+                                result.startsWith("拒绝") ||
+                                result.contains("不可用") ||
+                                result.contains("超限") ||
+                                result.contains("白名单") ||
+                                result.contains("黑名单"));
+                        boolean success = !rejected;
                         ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
-                                argsJson, result, false, true, null, latency);
+                                argsJson, result, rejected, success, null, latency);
 
                         toolCalls++;
                         WebDashboardListener.recordToolCall(toolName);

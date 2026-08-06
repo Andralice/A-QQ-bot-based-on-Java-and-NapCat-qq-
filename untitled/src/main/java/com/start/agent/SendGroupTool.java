@@ -1,18 +1,22 @@
 package com.start.agent;
 
 import com.start.Main;
-import com.start.config.BotConfig;
+import com.start.service.ToolAuthorizationService;
 
 import java.util.*;
 
 /**
  * 发群消息工具。用于在私聊中让糖果熊替自己往群里传话。
+ *
+ * 第三阶段 3.1 改造：白名单/黑名单/限流检查改由 ToolAuthorizationService 集中处理。
  */
 public class SendGroupTool implements Tool {
     private final Main bot;
+    private final String realUserId;
 
-    public SendGroupTool(Main bot) {
+    public SendGroupTool(Main bot, String realUserId) {
         this.bot = bot;
+        this.realUserId = realUserId;
     }
 
     @Override public String getName() { return "send_group_msg"; }
@@ -39,11 +43,15 @@ public class SendGroupTool implements Tool {
         String message = (String) args.get("message");
         if (groupId == null || message == null) return "缺少 group_id 或 message";
 
+        // 集中授权检查（白名单 + 黑名单 + 限流）
+        ToolAuthorizationService.AuthorizationResult auth =
+                ToolAuthorizationService.getInstance().checkGroupSend(groupId, message, realUserId);
+        if (!auth.allowed) {
+            return "拒绝发送：" + auth.reason;
+        }
+
         try {
             long targetGroup = Long.parseLong(groupId);
-            if (!BotConfig.getAllowedGroups().contains(targetGroup)) {
-                return "拒绝发送：目标群不在机器人允许的群白名单中";
-            }
             bot.sendGroupReply(targetGroup, message);
             return "已发送到群 " + groupId;
         } catch (Exception e) {
