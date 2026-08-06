@@ -453,6 +453,26 @@ public class DatabaseConfig {
                 "INDEX idx_er_result (result)," +
                 "INDEX idx_er_created (created_at DESC)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 工具审计记录表
+            "CREATE TABLE IF NOT EXISTS tool_audit_logs (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "tool_name VARCHAR(100) NOT NULL," +
+                "caller_user_id VARCHAR(50)," +
+                "group_id VARCHAR(50)," +
+                "session_id VARCHAR(200)," +
+                "args_summary TEXT," +
+                "result_summary TEXT," +
+                "rejected BOOLEAN DEFAULT FALSE," +
+                "success BOOLEAN DEFAULT TRUE," +
+                "error_message TEXT," +
+                "latency_ms BIGINT DEFAULT 0," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_audit_tool (tool_name, created_at)," +
+                "INDEX idx_audit_caller (caller_user_id, created_at)," +
+                "INDEX idx_audit_group (group_id, created_at)," +
+                "INDEX idx_audit_time (created_at)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         };
 
         List<String> failures = new ArrayList<>();

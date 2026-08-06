@@ -69,6 +69,9 @@ public final class BotBootstrap {
         bot.conversationExecutor = groupExecutor;
         ServerAdminService shellService = new ServerAdminService();
 
+        // 工具审计：单例注入，异步写库
+        ToolAuditService.init(new ToolAuditLogRepository(DatabaseConfig.getDataSource()));
+
         // 运行时事件总线 + 监听器
         ConversationRuntime runtime = new ConversationRuntime();
         bot.conversationRuntime = runtime;

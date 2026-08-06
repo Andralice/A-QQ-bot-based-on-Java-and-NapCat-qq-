@@ -1030,6 +1030,9 @@ public class BaiLianService {
                             args = objectMapper.readValue(argsJson, Map.class);
                         } catch (Exception e) {
                             logger.warn("解析工具 {} 参数失败: {}", toolName, e.getMessage());
+                            // 审计：参数解析失败
+                            ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
+                                    argsJson, null, false, false, "参数解析错误: " + e.getMessage(), 0);
                             Map<String, Object> errMsg = new HashMap<>();
                             errMsg.put("role", "tool");
                             errMsg.put("tool_call_id", callId);
@@ -1038,7 +1041,20 @@ public class BaiLianService {
                             continue;
                         }
 
-                        String result = tool.execute(args);
+                        long execStart = System.currentTimeMillis();
+                        String result;
+                        try {
+                            result = tool.execute(args);
+                        } catch (Exception e) {
+                            long latency = System.currentTimeMillis() - execStart;
+                            ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
+                                    argsJson, null, false, false, e.toString(), latency);
+                            throw e;
+                        }
+                        long latency = System.currentTimeMillis() - execStart;
+                        ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
+                                argsJson, result, false, true, null, latency);
+
                         toolCalls++;
                         WebDashboardListener.recordToolCall(toolName);
                         logger.info("🔧 [原生工具] {} args={} → {}", toolName, args,
