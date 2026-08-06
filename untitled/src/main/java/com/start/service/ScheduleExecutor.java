@@ -22,6 +22,11 @@ import java.util.function.Supplier;
 public class ScheduleExecutor {
     private static final Logger logger = LoggerFactory.getLogger(ScheduleExecutor.class);
 
+    // ===== 健康指标：最近一次调度结果（5.2 健康状态指标） =====
+    public static volatile long lastScheduledEventAt = 0;
+    public static volatile long lastScheduledTaskAt = 0;
+    public static volatile boolean lastScheduledSuccess = false;
+
     /**
      * 执行一个定时事件（LongTermMemory.trigger_at）。
      * 流程：claim → generate → send → 失败 release / 成功 markTriggered。
@@ -73,6 +78,8 @@ public class ScheduleExecutor {
             }
         }
         logger.info("定时事件已触发: {} -> {}", event.getContent(), event.getGroupId());
+        lastScheduledEventAt = System.currentTimeMillis();
+        lastScheduledSuccess = true;
         return true;
     }
 
@@ -126,6 +133,8 @@ public class ScheduleExecutor {
                 logger.error("释放周期任务租约失败 id={}: {}", task.getId(), releaseError.getMessage());
             }
         }
+        lastScheduledTaskAt = System.currentTimeMillis();
+        lastScheduledSuccess = true;
         return true;
     }
 }

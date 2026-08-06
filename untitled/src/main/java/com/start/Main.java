@@ -150,11 +150,36 @@ public class Main extends WebSocketClient {
         BotBootstrap.startBackgroundTasks(this);
     }
 
+    // ===== 健康状态（5.2 健康指标） =====
+    private final BotHealth health = new BotHealth();
+    public BotHealth getHealth() { return health; }
+
+    /**
+     * 全局健康状态：WebSocket 连接、最近重连时间、pending 请求数。
+     * 写时由 Main.onOpen/onClose/attemptReconnect 维护，读时由 Dashboard 通过
+     * Supplier<BotHealth> 拉取快照。
+     *
+     * 注意：作为 Main 的 non-static inner class，可以直接访问外层 pendingRequests。
+     */
+    public final class BotHealth {
+        private volatile boolean webSocketConnected = false;
+        private volatile long lastReconnectAt = 0;
+        private volatile long lastDisconnectAt = 0;
+
+        public void setWebSocketConnected(boolean v) { this.webSocketConnected = v; }
+        public boolean isWebSocketConnected() { return webSocketConnected; }
+        public long getLastReconnectAt() { return lastReconnectAt; }
+        public long getLastDisconnectAt() { return lastDisconnectAt; }
+        public int getPendingRequestCount() { return pendingRequests.size(); }
+    }
+
     // ===== WebSocket 生命周期回调 =====
 
     @Override
     public void onOpen(ServerHandshake handshakedata) {
         logger.info("✅ 已连接 NapCat WebSocket");
+        health.setWebSocketConnected(true);
+        health.lastReconnectAt = System.currentTimeMillis();
         // 异步拉取预加载群的成员昵称写入数据库
         new Thread(() -> seedGroupNicknames()).start();
     }
@@ -329,6 +354,8 @@ public class Main extends WebSocketClient {
     @Override
     public void onClose(int code, String reason, boolean remote) {
         logger.warn("❌ 连接断开 (code={}, remote={}), 5秒后重连...", code, remote);
+        health.setWebSocketConnected(false);
+        health.lastDisconnectAt = System.currentTimeMillis();
         failPendingRequests(new IllegalStateException("OneBot WebSocket 已断开"));
         reconnectScheduler.schedule(this::attemptReconnect, 5, TimeUnit.SECONDS);
     }
@@ -345,6 +372,8 @@ public class Main extends WebSocketClient {
             logger.info("🔄 尝试重连...");
             super.reconnect();
             logger.info("✅ 重连成功");
+            health.setWebSocketConnected(true);
+            health.lastReconnectAt = System.currentTimeMillis();
         } catch (Exception e) {
             logger.error("⚠️ 重连失败，10秒后再次尝试...", e);
             reconnectScheduler.schedule(this::attemptReconnect, 10, TimeUnit.SECONDS);

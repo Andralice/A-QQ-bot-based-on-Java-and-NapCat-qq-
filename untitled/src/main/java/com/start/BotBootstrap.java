@@ -96,6 +96,9 @@ public final class BotBootstrap {
 
     /** 启动所有后台定时任务（守护线程）。 */
     public static void startBackgroundTasks(Main bot) {
+        // 启动自检（5.1）：必需字段 + OneBot WS URL + AI API Key
+        preflightCheck();
+
         // 防刷检测
         bot.spamDetector = new SpamDetector(bot);
         logger.info("SpamDetector 初始化完成");
@@ -123,11 +126,31 @@ public final class BotBootstrap {
         startDashboard(bot);
     }
 
+    /**
+     * 启动前快速检查：缺关键配置直接拒绝启动。
+     * 比启动后才发现 "BAILIAN_API_KEY 缺失" 提前暴露问题（5.1 启动自检）。
+     */
+    private static void preflightCheck() {
+        String apiKey = BotConfig.getBaiLianApiKey();
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalStateException("启动失败：BAILIAN_API_KEY 未配置（检查 application.properties）");
+        }
+        String wsUrl = BotConfig.getWsUrl();
+        if (wsUrl == null || wsUrl.isBlank()) {
+            throw new IllegalStateException("启动失败：NAPCAT_WS_URL 未配置");
+        }
+        // 数据库连接 + 迁移在 DatabaseConfig.initConnectionPool 内部已检查
+        // Dashboard 鉴权在 WebDashboardListener.start() 内部已检查
+        logger.info("✅ 启动自检通过（BAILIAN_API_KEY / WS_URL 已配置）");
+    }
+
     private static void startDashboard(Main bot) {
         WebDashboardListener dashboard = new WebDashboardListener();
         if (bot.conversationExecutor != null) {
             dashboard.setExecutorMetricsProvider(() -> bot.conversationExecutor.getMetrics());
         }
+        // 健康状态注入（5.2）
+        dashboard.setHealthProvider(() -> bot.getHealth());
         dashboard.start();
         if (bot.conversationRuntime != null) {
             bot.conversationRuntime.addListener(dashboard);

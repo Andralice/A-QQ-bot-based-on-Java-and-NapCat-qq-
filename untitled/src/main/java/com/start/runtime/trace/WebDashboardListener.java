@@ -100,6 +100,7 @@ public class WebDashboardListener implements RuntimeListener {
     private final String host;
     private final String token;   // null = 不需要鉴权
     private volatile java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> executorMetricsProvider;
+    private volatile java.util.function.Supplier<com.start.Main.BotHealth> healthProvider;
 
     public WebDashboardListener() {
         this.host = System.getProperty("dashboard.host",
@@ -159,6 +160,15 @@ public class WebDashboardListener implements RuntimeListener {
     public void setExecutorMetricsProvider(
             java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> provider) {
         this.executorMetricsProvider = provider;
+    }
+
+    /**
+     * 注入 BotHealth 状态提供者。/api/system 会暴露 WebSocket 连接、
+     * pending 请求数、最近重连/断开时间、迁移结果、调度结果等。
+     */
+    public void setHealthProvider(
+            java.util.function.Supplier<com.start.Main.BotHealth> provider) {
+        this.healthProvider = provider;
     }
 
     // ===== RuntimeListener 实现 =====
@@ -317,6 +327,29 @@ public class WebDashboardListener implements RuntimeListener {
         o.put("threadCount", ManagementFactory.getThreadMXBean().getThreadCount());
         o.put("activeGroups", groups.size());
 
+        // 健康状态指标（5.2）
+        java.util.function.Supplier<com.start.Main.BotHealth> hp = healthProvider;
+        if (hp != null) {
+            try {
+                com.start.Main.BotHealth h = hp.get();
+                ObjectNode healthNode = mapper.createObjectNode();
+                healthNode.put("webSocketConnected", h.isWebSocketConnected());
+                healthNode.put("pendingRequests", h.getPendingRequestCount());
+                healthNode.put("lastReconnectAt", formatTime(h.getLastReconnectAt()));
+                healthNode.put("lastDisconnectAt", formatTime(h.getLastDisconnectAt()));
+                healthNode.put("lastMigrationAt", formatTime(com.start.config.DatabaseConfig.lastMigrationAt));
+                healthNode.put("lastMigrationSuccess", com.start.config.DatabaseConfig.lastMigrationSuccess);
+                healthNode.put("lastScheduledEventAt",
+                        formatTime(com.start.service.ScheduleExecutor.lastScheduledEventAt));
+                healthNode.put("lastScheduledTaskAt",
+                        formatTime(com.start.service.ScheduleExecutor.lastScheduledTaskAt));
+                healthNode.put("lastScheduledSuccess", com.start.service.ScheduleExecutor.lastScheduledSuccess);
+                o.set("health", healthNode);
+            } catch (Exception e) {
+                logger.debug("拉取 health 失败: {}", e.getMessage());
+            }
+        }
+
         // GroupSerialExecutor 线程池指标
         java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> provider =
                 executorMetricsProvider;
@@ -402,6 +435,14 @@ public class WebDashboardListener implements RuntimeListener {
         if (days > 0) return String.format("%dd %dh %dm", days, hours, mins);
         if (hours > 0) return String.format("%dh %dm", hours, mins);
         return String.format("%dm %ds", mins, d.toSeconds() % 60);
+    }
+
+    /** 0 返回 "-"（从未发生过），否则返回 HH:mm:ss 格式的本地时间。 */
+    private static String formatTime(long epochMs) {
+        if (epochMs <= 0) return "-";
+        return Instant.ofEpochMilli(epochMs)
+                .atZone(ZoneId.of("Asia/Shanghai"))
+                .format(DateTimeFormatter.ofPattern("HH:mm:ss"));
     }
 
     // ===== 内嵌 HTML 面板 =====

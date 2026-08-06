@@ -17,6 +17,10 @@ import java.util.Properties;
 public class DatabaseConfig {
 
     private static final Logger logger = LoggerFactory.getLogger(DatabaseConfig.class);
+
+    // ===== 健康指标：迁移结果（5.2 健康状态指标） =====
+    public static volatile long lastMigrationAt = 0;
+    public static volatile boolean lastMigrationSuccess = false;
     private static HikariDataSource dataSource;
     private static boolean initialized = false;
 
@@ -491,8 +495,12 @@ public class DatabaseConfig {
             }
         }
         if (!failures.isEmpty()) {
+            lastMigrationAt = System.currentTimeMillis();
+            lastMigrationSuccess = false;
             throw new IllegalStateException("数据库迁移失败 " + failures.size() + " 项: " + failures.get(0));
         }
+        lastMigrationAt = System.currentTimeMillis();
+        lastMigrationSuccess = true;
         logger.info("数据库表结构迁移完成");
     }
 
