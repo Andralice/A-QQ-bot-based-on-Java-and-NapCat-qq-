@@ -14,6 +14,8 @@ import java.util.*;
  */
 public class ScheduleEventTool implements Tool {
     private final LongTermMemoryRepository repo;
+    private final String currentUserId;
+    private final String currentGroupId;
 
     private static final List<DateTimeFormatter> FORMATS = Arrays.asList(
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
@@ -29,8 +31,10 @@ public class ScheduleEventTool implements Tool {
             DateTimeFormatter.ISO_LOCAL_DATE
     );
 
-    public ScheduleEventTool(LongTermMemoryRepository repo) {
+    public ScheduleEventTool(LongTermMemoryRepository repo, String currentUserId, String currentGroupId) {
         this.repo = repo;
+        this.currentUserId = currentUserId;
+        this.currentGroupId = currentGroupId;
     }
 
     @Override public String getName() { return "schedule_event"; }
@@ -50,15 +54,15 @@ public class ScheduleEventTool implements Tool {
                         "content", Map.of("type", "string", "description", "事件描述，简洁一句话，如归儿的生日、考试日"),
                         "trigger_time", Map.of("type", "string", "description", "触发时间，格式yyyy-MM-dd HH:mm:ss。只写日期则默认当天09:00触发"),
                         "event_type", Map.of("type", "string", "description", "事件类型：birthday/anniversary/meeting/custom"),
-                        "importance", Map.of("type", "string", "description", "重要性 1-5，生日类建议5")
-                ),
-                "required", Arrays.asList("user_id", "group_id", "content", "trigger_time"));
+                         "importance", Map.of("type", "string", "description", "重要性 1-5，生日类建议5")
+                 ),
+                 "required", Arrays.asList("content", "trigger_time"));
     }
 
     @Override
     public String execute(Map<String, Object> args) {
-        String userId = (String) args.get("user_id");
-        String groupId = (String) args.get("group_id");
+        String userId = currentUserId;
+        String groupId = currentGroupId;
         String content = (String) args.get("content");
         String triggerTimeStr = (String) args.get("trigger_time");
 

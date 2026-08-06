@@ -143,7 +143,9 @@ public class LongTermMemoryRepository implements Repository {
 
     /** 查询所有到期的定时事件（trigger_at <= NOW() AND triggered = FALSE） */
     public List<LongTermMemory> findDueEvents() throws SQLException {
-        String sql = "SELECT * FROM long_term_memories WHERE trigger_at IS NOT NULL AND triggered = FALSE AND trigger_at <= NOW() ORDER BY trigger_at ASC LIMIT 20";
+        String sql = "SELECT * FROM long_term_memories WHERE trigger_at IS NOT NULL AND triggered = FALSE " +
+                "AND trigger_at <= NOW() AND (trigger_claimed_at IS NULL OR trigger_claimed_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE)) " +
+                "ORDER BY trigger_at ASC LIMIT 20";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ResultSet rs = ps.executeQuery();
@@ -180,7 +182,30 @@ public class LongTermMemoryRepository implements Repository {
 
     /** 标记事件已触发 */
     public void markTriggered(long id) throws SQLException {
-        String sql = "UPDATE long_term_memories SET triggered = TRUE WHERE id = ?";
+        String sql = "UPDATE long_term_memories SET triggered = TRUE, trigger_claimed_at = NULL WHERE id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 抢占一个到期事件，避免多个扫描周期或实例重复执行。 */
+    public boolean claimDueEvent(long id) throws SQLException {
+        String sql = "UPDATE long_term_memories SET trigger_claimed_at = NOW() " +
+                "WHERE id = ? AND trigger_at IS NOT NULL AND triggered = FALSE AND trigger_at <= NOW() " +
+                "AND (trigger_claimed_at IS NULL OR trigger_claimed_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE))";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            return ps.executeUpdate() == 1;
+        }
+    }
+
+    /** 发送失败时释放事件租约，允许下一轮扫描重试。 */
+    public void releaseEventClaim(long id) throws SQLException {
+        String sql = "UPDATE long_term_memories SET trigger_claimed_at = NULL " +
+                "WHERE id = ? AND triggered = FALSE";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);

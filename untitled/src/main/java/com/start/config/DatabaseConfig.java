@@ -10,6 +10,8 @@ import java.io.InputStream;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
 public class DatabaseConfig {
@@ -87,6 +89,10 @@ public class DatabaseConfig {
 
             } catch (Exception e) {
                 logger.error("连接尝试 {} 失败: {}", attempt, e.getMessage());
+                if (dataSource != null) {
+                    try { dataSource.close(); } catch (Exception ignored) {}
+                    dataSource = null;
+                }
                 if (attempt < 3) {
                     try {
                         Thread.sleep(3000);
@@ -94,7 +100,7 @@ public class DatabaseConfig {
                         Thread.currentThread().interrupt();
                     }
                 } else {
-                    logger.error("❌ 数据库连接池初始化失败，将使用降级模式");
+                    logger.error("❌ 数据库连接池初始化失败，机器人将停止启动");
                     logger.error("提示：请检查：");
                     logger.error("1. SSH隧道是否启动 (ssh -L 3307:localhost:3306 ...)");
                     logger.error("2. MySQL服务是否运行");
@@ -103,8 +109,7 @@ public class DatabaseConfig {
             }
         }
 
-        // 如果所有尝试都失败，设置一个标志
-        logger.warn("警告：数据库连接失败，相关功能将不可用");
+        throw new IllegalStateException("数据库连接池初始化失败，机器人不能以不完整 schema 启动");
     }
 
     /**
@@ -208,6 +213,7 @@ public class DatabaseConfig {
             // 新增列（MySQL 不支持 ADD COLUMN IF NOT EXISTS，去掉该语法，重复执行时异常被 catch 处理）
             "ALTER TABLE long_term_memories ADD COLUMN trigger_at DATETIME NULL",
             "ALTER TABLE long_term_memories ADD COLUMN triggered BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE long_term_memories ADD COLUMN trigger_claimed_at DATETIME NULL",
             "ALTER TABLE long_term_memories ADD COLUMN keywords TEXT",
             "ALTER TABLE long_term_memories ADD COLUMN recall_count INT DEFAULT 0",
             "ALTER TABLE long_term_memories ADD COLUMN source VARCHAR(20) DEFAULT 'SELF_REPORTED'",
@@ -361,11 +367,14 @@ public class DatabaseConfig {
                 "enabled BOOLEAN DEFAULT TRUE," +
                 "last_fired_at TIMESTAMP NULL," +
                 "next_fire_at TIMESTAMP NULL," +
+                "fire_claimed_at TIMESTAMP NULL," +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
                 "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
                 "INDEX idx_rt_next_fire (next_fire_at)," +
                 "INDEX idx_rt_user_group (user_id, group_id)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            "ALTER TABLE recurring_tasks ADD COLUMN fire_claimed_at TIMESTAMP NULL",
 
             // 用户职业（有状态，运势驱动位阶波动）
             "CREATE TABLE IF NOT EXISTS user_professions (" +
@@ -446,6 +455,7 @@ public class DatabaseConfig {
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         };
 
+        List<String> failures = new ArrayList<>();
         for (String sql : migrations) {
             try (java.sql.Statement stmt = conn.createStatement()) {
                 stmt.execute(sql);
@@ -455,9 +465,13 @@ public class DatabaseConfig {
                 if (e.getMessage() != null && e.getMessage().contains("Duplicate column")) {
                     logger.debug("列已存在，跳过: {}", sql.substring(0, Math.min(60, sql.length())));
                 } else {
-                    logger.warn("迁移跳过 ({}): {}", e.getMessage(), sql.substring(0, Math.min(60, sql.length())));
+                    logger.error("迁移失败 ({}): {}", e.getMessage(), sql.substring(0, Math.min(60, sql.length())));
+                    failures.add(e.getMessage() != null ? e.getMessage() : "unknown migration error");
                 }
             }
+        }
+        if (!failures.isEmpty()) {
+            throw new IllegalStateException("数据库迁移失败 " + failures.size() + " 项: " + failures.get(0));
         }
         logger.info("数据库表结构迁移完成");
     }

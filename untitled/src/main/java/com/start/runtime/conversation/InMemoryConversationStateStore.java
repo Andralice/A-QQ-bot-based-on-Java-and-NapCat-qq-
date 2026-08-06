@@ -14,7 +14,7 @@ public class InMemoryConversationStateStore implements ConversationStateStore {
     private final Map<String, BaiLianService.UserThread> userThreads;
     private final Map<String, Deque<BaiLianService.ContextEvent>> groupContexts;
     private final Map<String, BaiLianService.PendingAwait> pendingAwaits;
-    private final Map<String, List<Long>> groupReactionHistory;
+    private final Map<String, Deque<Long>> groupReactionHistory;
     private static final int MAX_REACTIONS = 10;
     private static final long REACTION_WINDOW_MS = 300_000;
 
@@ -22,7 +22,7 @@ public class InMemoryConversationStateStore implements ConversationStateStore {
             Map<String, BaiLianService.UserThread> userThreads,
             Map<String, Deque<BaiLianService.ContextEvent>> groupContexts,
             Map<String, BaiLianService.PendingAwait> pendingAwaits,
-            Map<String, List<Long>> groupReactionHistory) {
+            Map<String, Deque<Long>> groupReactionHistory) {
         this.userThreads = userThreads;
         this.groupContexts = groupContexts;
         this.pendingAwaits = pendingAwaits;
@@ -76,14 +76,20 @@ public class InMemoryConversationStateStore implements ConversationStateStore {
 
     @Override
     public boolean canReact(String groupId) {
-        List<Long> history = groupReactionHistory.computeIfAbsent(groupId, k -> new ArrayList<>());
-        history.removeIf(ts -> System.currentTimeMillis() - ts > REACTION_WINDOW_MS);
-        return history.size() < MAX_REACTIONS;
+        Deque<Long> history = groupReactionHistory.computeIfAbsent(
+                groupId, k -> new ConcurrentLinkedDeque<>());
+        synchronized (history) {
+            history.removeIf(ts -> System.currentTimeMillis() - ts > REACTION_WINDOW_MS);
+            return history.size() < MAX_REACTIONS;
+        }
     }
 
     @Override
     public void recordReaction(String groupId) {
-        groupReactionHistory.computeIfAbsent(groupId, k -> new ArrayList<>())
-                .add(System.currentTimeMillis());
+        Deque<Long> history = groupReactionHistory.computeIfAbsent(
+                groupId, k -> new ConcurrentLinkedDeque<>());
+        synchronized (history) {
+            history.addLast(System.currentTimeMillis());
+        }
     }
 }

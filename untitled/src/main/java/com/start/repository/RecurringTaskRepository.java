@@ -40,7 +40,9 @@ public class RecurringTaskRepository implements Repository {
 
     /** 查询所有已到触发时间且已启用的任务 */
     public List<RecurringTask> findDueTasks() throws SQLException {
-        String sql = "SELECT * FROM recurring_tasks WHERE enabled = TRUE AND next_fire_at IS NOT NULL AND next_fire_at <= NOW() ORDER BY next_fire_at ASC LIMIT 20";
+        String sql = "SELECT * FROM recurring_tasks WHERE enabled = TRUE AND next_fire_at IS NOT NULL AND next_fire_at <= NOW() " +
+                "AND (fire_claimed_at IS NULL OR fire_claimed_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE)) " +
+                "ORDER BY next_fire_at ASC LIMIT 20";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             return mapResults(ps);
@@ -49,11 +51,34 @@ public class RecurringTaskRepository implements Repository {
 
     /** 更新 last_fired_at 和 next_fire_at */
     public void markFired(long id, LocalDateTime nextFireAt) throws SQLException {
-        String sql = "UPDATE recurring_tasks SET last_fired_at = NOW(), next_fire_at = ?, updated_at = NOW() WHERE id = ?";
+        String sql = "UPDATE recurring_tasks SET last_fired_at = NOW(), next_fire_at = ?, fire_claimed_at = NULL, updated_at = NOW() WHERE id = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setTimestamp(1, nextFireAt != null ? Timestamp.valueOf(nextFireAt) : null);
             ps.setLong(2, id);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 抢占一个到期周期任务，避免重复执行。 */
+    public boolean claimDueTask(long id) throws SQLException {
+        String sql = "UPDATE recurring_tasks SET fire_claimed_at = NOW(), updated_at = NOW() " +
+                "WHERE id = ? AND enabled = TRUE AND next_fire_at IS NOT NULL AND next_fire_at <= NOW() " +
+                "AND (fire_claimed_at IS NULL OR fire_claimed_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE))";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
+            return ps.executeUpdate() == 1;
+        }
+    }
+
+    /** 发送失败时释放周期任务租约，允许下一轮扫描重试。 */
+    public void releaseTaskClaim(long id) throws SQLException {
+        String sql = "UPDATE recurring_tasks SET fire_claimed_at = NULL, updated_at = NOW() " +
+                "WHERE id = ? AND enabled = TRUE";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id);
             ps.executeUpdate();
         }
     }

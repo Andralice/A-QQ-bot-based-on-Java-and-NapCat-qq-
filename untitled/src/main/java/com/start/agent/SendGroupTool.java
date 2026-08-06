@@ -1,6 +1,7 @@
 package com.start.agent;
 
 import com.start.Main;
+import com.start.config.BotConfig;
 
 import java.util.*;
 
@@ -39,7 +40,11 @@ public class SendGroupTool implements Tool {
         if (groupId == null || message == null) return "缺少 group_id 或 message";
 
         try {
-            bot.sendGroupReply(Long.parseLong(groupId), message);
+            long targetGroup = Long.parseLong(groupId);
+            if (!BotConfig.getAllowedGroups().contains(targetGroup)) {
+                return "拒绝发送：目标群不在机器人允许的群白名单中";
+            }
+            bot.sendGroupReply(targetGroup, message);
             return "已发送到群 " + groupId;
         } catch (Exception e) {
             return "发送失败: " + e.getMessage();

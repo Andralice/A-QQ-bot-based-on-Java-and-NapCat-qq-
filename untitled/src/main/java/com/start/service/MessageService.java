@@ -2,6 +2,7 @@ package com.start.service;
 
 import com.start.model.ChatMessage;
 import com.start.repository.MessageRepository;
+import com.start.repository.UserRepository;
 import java.time.LocalDateTime;
 import java.util.*;
 
@@ -18,9 +19,11 @@ import java.util.*;
  */
 public class MessageService {
     private final MessageRepository messageRepo;
+    private final UserRepository userRepo;
 
     public MessageService() {
         this.messageRepo = new MessageRepository();
+        this.userRepo = new UserRepository();
     }
 
     /**
@@ -45,7 +48,9 @@ public class MessageService {
             }
         }
 
+        userRepo.createOrUpdateUser(userId, "");
         messageRepo.saveMessage(data);
+        userRepo.incrementMessageCount(userId);
     }
 
     /**

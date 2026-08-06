@@ -8,7 +8,6 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.Set;
 
 /**
  * 私聊提醒任务管理命令处理器
@@ -21,13 +20,6 @@ import java.util.Set;
  * 所有功能仅限私聊使用，且需管理员权限。
  */
 public class ReminderHandler implements MessageHandler {
-
-    /**
-     * 管理员 QQ 号白名单（建议后续从配置读取）
-     */
-    private static final Set<Long> ADMIN_USERS = Set.of(
-            0L   // ← 请替换为你的 QQ 号，或通过 admin.qq 配置
-    );
 
     /**
      * 判断当前消息是否应由本 Handler 处理。
@@ -86,7 +78,7 @@ public class ReminderHandler implements MessageHandler {
     public void handle(JsonNode message, Main bot) {
         long userId = message.path("user_id").asLong();
 
-        if (!ADMIN_USERS.contains(userId)) {
+        if (userId != com.start.config.BotConfig.getAdminQq()) {
             bot.sendPrivateReply(userId, "❌ 权限不足，仅管理员可使用此命令。");
             return;
         }

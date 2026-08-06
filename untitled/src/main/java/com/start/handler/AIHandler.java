@@ -267,7 +267,6 @@ public class AIHandler implements MessageHandler {
                 sendSplitGroupReplies(bot, groupId, shortReply);
                 // 留痕：让后续 Interpreter 能识别到这条 ai_reply
                 // （否则 fast path 回复后的 3 分钟内，AI_COMMENTED 事件识别不到）
-                aiService.recordGroupContext(gid, uid, "糖果熊", shortReply, "ai_reply");
                 logDecision(gid, uid, result.event().name(), "REPLY", "memory_recall_fast", 0, 0, 0);
                 return;
             }
@@ -589,8 +588,7 @@ public class AIHandler implements MessageHandler {
                 String senderNick = originalMsg.path("sender").path("card").asText();
                 if (senderNick.isEmpty()) senderNick = originalMsg.path("sender").path("nickname").asText();
                 aiService.recordUserInteraction(groupId, userId, reply);
-                aiService.recordGroupContext(groupId, userId, senderNick, reply, "ai_reply");
-            } else {
+                } else {
                 sendSplitPrivateReplies(bot, originalMsg, reply);
             }
         });

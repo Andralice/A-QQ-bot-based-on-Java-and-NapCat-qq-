@@ -98,6 +98,9 @@ public class Main extends WebSocketClient {
     /** 事件处理器注册中心，用于动态绑定不同消息类型的处理逻辑。 */
     HandlerRegistry handlerRegistry;
 
+    /** 统一调度对话和后台生成任务，避免绕过群级串行约束。 */
+    GroupSerialExecutor conversationExecutor;
+
     /** 运行时事件总线，AIHandler 触发事件，Listener 消费。 */
     com.start.runtime.ConversationRuntime conversationRuntime;
 
@@ -185,7 +188,7 @@ public class Main extends WebSocketClient {
 
     @Override
     public void onMessage(String message) {
-        logger.debug("📡 原始事件: {}", message);
+        logger.debug("📡 收到 OneBot 事件，payload={} chars", message != null ? message.length() : 0);
 
         try {
             JsonNode event = MAPPER.readTree(message);
@@ -326,20 +329,25 @@ public class Main extends WebSocketClient {
     @Override
     public void onClose(int code, String reason, boolean remote) {
         logger.warn("❌ 连接断开 (code={}, remote={}), 5秒后重连...", code, remote);
-        reconnectScheduler.schedule(this::reconnect, 5, TimeUnit.SECONDS);
+        failPendingRequests(new IllegalStateException("OneBot WebSocket 已断开"));
+        reconnectScheduler.schedule(this::attemptReconnect, 5, TimeUnit.SECONDS);
     }
 
     /**
      * 递归重连机制：失败后指数退避（此处简化为固定 10 秒）。
      */
     public void reconnect() {
+        attemptReconnect();
+    }
+
+    private void attemptReconnect() {
         try {
             logger.info("🔄 尝试重连...");
-            this.reconnect();
+            super.reconnect();
             logger.info("✅ 重连成功");
         } catch (Exception e) {
             logger.error("⚠️ 重连失败，10秒后再次尝试...", e);
-            reconnectScheduler.schedule(this::reconnect, 10, TimeUnit.SECONDS);
+            reconnectScheduler.schedule(this::attemptReconnect, 10, TimeUnit.SECONDS);
         }
     }
 
@@ -358,6 +366,11 @@ public class Main extends WebSocketClient {
      * @return 返回一个 CompletableFuture，可在后续处理响应
      */
     public CompletableFuture<JsonNode> callOneBotApi(String action, JsonNode params) {
+        if (!isOpen()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("OneBot WebSocket 未连接，无法调用: " + action));
+        }
+
         String echo = "req_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000000);
         CompletableFuture<JsonNode> future = new CompletableFuture<>();
         pendingRequests.put(echo, future);
@@ -367,14 +380,65 @@ public class Main extends WebSocketClient {
         request.set("params", params);
         request.put("echo", echo);
 
-        this.send(request.toString());
+        try {
+            this.send(request.toString());
+        } catch (RuntimeException e) {
+            pendingRequests.remove(echo, future);
+            future.completeExceptionally(e);
+            return future;
+        }
         logger.debug("📤 发送 OneBot API 请求: action={}, echo={}", action, echo);
 
         return future.orTimeout(10, TimeUnit.SECONDS)
+                .whenComplete((response, error) -> pendingRequests.remove(echo, future))
                 .exceptionally(t -> {
-                    logger.warn("⏰ OneBot API 调用失败或超时: action={}, echo={}", action, echo, t);
+                    logger.warn("⏰ OneBot API 调用失败或超时: action={}, echo={}, reason={}",
+                            action, echo, t.toString());
                     return null;
                 });
+    }
+
+    private void failPendingRequests(Throwable cause) {
+        pendingRequests.forEach((echo, future) -> {
+            if (pendingRequests.remove(echo, future)) {
+                future.completeExceptionally(cause);
+            }
+        });
+    }
+
+    /**
+     * 通过 OneBot API 发送消息并等待回执确认。
+     * 成功条件：WebSocket 写入成功 + OneBot 回执 status=ok 且 retcode=0。
+     * 失败场景：连接断开 / 回执超时 / 回执 retcode 非零。
+     *
+     * <p>同步阻塞最长 5 秒，正常 OneBot 真实回执延迟 100-500ms，
+     * 5s 是兜底而非预期值。调用方应在 GroupSerialExecutor worker 中按群级串行执行。
+     */
+    private boolean sendWithReceipt(String action, ObjectNode params) {
+        try {
+            CompletableFuture<JsonNode> future = callOneBotApi(action, params);
+            JsonNode response = future.get(5, TimeUnit.SECONDS);
+            if (response == null) {
+                logger.warn("⚠️ OneBot API {} 回执为空（超时或连接异常）", action);
+                return false;
+            }
+            String status = response.path("status").asText();
+            int retcode = response.path("retcode").asInt();
+            if (!"ok".equals(status) || retcode != 0) {
+                String msg = response.path("msg").asText();
+                String wording = response.path("wording").asText();
+                logger.warn("⚠️ OneBot API {} 回执失败: status={}, retcode={}, msg={}, wording={}",
+                        action, status, retcode, msg, wording);
+                return false;
+            }
+            return true;
+        } catch (java.util.concurrent.TimeoutException e) {
+            logger.warn("⏰ OneBot API {} 回执超时（5s）", action);
+            return false;
+        } catch (Exception e) {
+            logger.error("❌ OneBot API {} 发送异常: {}", action, e.toString());
+            return false;
+        }
     }
 
     // ===== 消息发送便捷方法 =====
@@ -382,15 +446,13 @@ public class Main extends WebSocketClient {
     /**
      * 根据原始消息类型（群/私聊）自动选择发送方式。
      */
-    public void sendReply(JsonNode msg, String reply) {
+    public boolean sendReply(JsonNode msg, String reply) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
-        logger.debug("📤 [{}] 发送回复: {}", traceId, reply);
+        logger.debug("📤 [{}] 发送回复，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
-            ObjectNode action = MAPPER.createObjectNode();
             String msgType = msg.path("message_type").asText();
-            action.put("action", "send_" + msgType + "_msg");
 
-            ObjectNode params = action.putObject("params");
+            ObjectNode params = MAPPER.createObjectNode();
             if ("group".equals(msgType)) {
                 params.put("group_id", msg.path("group_id").asLong());
             } else {
@@ -398,57 +460,102 @@ public class Main extends WebSocketClient {
             }
             params.put("message", reply);
 
-            this.send(action.toString());
-            logger.debug("📤 已发送回复: {}", reply);
+            boolean delivered = sendWithReceipt("send_" + msgType + "_msg", params);
+            if (!delivered) {
+                return false;
+            }
+            // ✅ 仅在 OneBot 确认送达后才持久化
+            try {
+                if (this.messageService != null) {
+                    boolean privateMessage = "private".equals(msgType);
+                    String sessionId = privateMessage
+                            ? "private_" + msg.path("user_id").asLong()
+                            : "group_" + msg.path("group_id").asLong() + "_bot";
+                    String targetGroup = privateMessage ? null : String.valueOf(msg.path("group_id").asLong());
+                    this.messageService.saveAIReply(sessionId, targetGroup, reply, null, privateMessage);
+                }
+            } catch (Exception e) {
+                logger.warn("回复已发送，但消息持久化失败: {}", e.getMessage());
+            }
+            logger.debug("📤 已发送回复，payload={} chars", reply != null ? reply.length() : 0);
+            return true;
         } catch (Exception e) {
             logger.error("❌ 发送回复失败", e);
+            return false;
         }
     }
 
-    public void sendPrivateReply(long userId, String reply) {
-        sendPrivateReply(userId, 0, reply);
+    public boolean sendPrivateReply(long userId, String reply) {
+        return sendPrivateReply(userId, 0, reply);
     }
 
     /** 带 group_id 的私聊，非好友需要 group_id 建立临时会话 */
-    public void sendPrivateReply(long userId, long groupId, String reply) {
+    public boolean sendPrivateReply(long userId, long groupId, String reply) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
-        logger.debug("📤 [{}] 发送私聊: {}", traceId, reply);
+        logger.debug("📤 [{}] 发送私聊，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
-            ObjectNode action = MAPPER.createObjectNode();
-            action.put("action", "send_private_msg");
-            ObjectNode params = action.putObject("params");
+            ObjectNode params = MAPPER.createObjectNode();
             params.put("user_id", userId);
             if (groupId > 0) params.put("group_id", groupId);
             params.put("message", reply);
-            this.send(action.toString());
-            logger.debug("📤 已发送私聊: {}", reply);
+            boolean delivered = sendWithReceipt("send_private_msg", params);
+            if (!delivered) {
+                return false;
+            }
+            // ✅ 仅在 OneBot 确认送达后才持久化
+            try {
+                if (this.messageService != null) {
+                    this.messageService.saveAIReply("private_" + userId, null, reply, null, true);
+                }
+            } catch (Exception e) {
+                logger.warn("私聊已发送，但消息持久化失败: {}", e.getMessage());
+            }
+            logger.debug("📤 已发送私聊，payload={} chars", reply != null ? reply.length() : 0);
+            return true;
         } catch (Exception e) {
             logger.error("❌ 发送私聊失败", e);
+            return false;
         }
     }
 
-    public void sendGroupReply(long groupId, String reply) {
+    public boolean sendGroupReply(long groupId, String reply) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
-        logger.debug("📤 [{}] 发送群聊回复: {}", traceId, reply);
+        logger.debug("📤 [{}] 发送群聊回复，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
-            ObjectNode action = MAPPER.createObjectNode();
-            action.put("action", "send_group_msg");
-            ObjectNode params = action.putObject("params");
+            ObjectNode params = MAPPER.createObjectNode();
             params.put("group_id", groupId);
             params.put("message", reply);
-            this.send(action.toString());
-            logger.debug("📤 已发送群聊回复: {}", reply);
-            if (this.baiLianService != null) {
-                String gid = String.valueOf(groupId);
-                this.baiLianService.recordGroupContext(
-                        gid, "candybear", "糖果熊", reply, "bot_reply");
-                this.baiLianService.recordBotOwnGroupMessage(gid, reply);
-                this.baiLianService.getBotMemory().record(
-                        String.valueOf(groupId), BotMemoryService.EntryType.SAID, null,
-                        reply.length() > 100 ? reply.substring(0, 100) + "..." : reply);
+            boolean delivered = sendWithReceipt("send_group_msg", params);
+            if (!delivered) {
+                return false;
             }
+            // ✅ 仅在 OneBot 确认送达后才持久化，避免数据不一致
+            try {
+                if (this.messageService != null) {
+                    this.messageService.saveAIReply("group_" + groupId + "_bot",
+                            String.valueOf(groupId), reply, null, false);
+                }
+            } catch (Exception e) {
+                logger.warn("群消息已发送，但消息持久化失败: {}", e.getMessage());
+            }
+            logger.debug("📤 已发送群聊回复，payload={} chars", reply != null ? reply.length() : 0);
+            try {
+                if (this.baiLianService != null) {
+                    String gid = String.valueOf(groupId);
+                    this.baiLianService.recordGroupContext(
+                            gid, "candybear", "糖果熊", reply, "bot_reply");
+                    this.baiLianService.recordBotOwnGroupMessage(gid, reply);
+                    this.baiLianService.getBotMemory().record(
+                            String.valueOf(groupId), BotMemoryService.EntryType.SAID, null,
+                            reply.length() > 100 ? reply.substring(0, 100) + "..." : reply);
+                }
+            } catch (Exception e) {
+                logger.warn("群消息已发送，但运行时上下文记录失败: {}", e.getMessage());
+            }
+            return true;
         } catch (Exception e) {
             logger.error("❌ 发送群聊回复失败", e);
+            return false;
         }
     }
 

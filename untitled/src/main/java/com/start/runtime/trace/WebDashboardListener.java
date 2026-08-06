@@ -102,10 +102,11 @@ public class WebDashboardListener implements RuntimeListener {
 
     public WebDashboardListener() {
         this.host = System.getProperty("dashboard.host",
-                System.getenv().getOrDefault("DASHBOARD_HOST", "0.0.0.0"));
+                System.getenv().getOrDefault("DASHBOARD_HOST", "127.0.0.1"));
         this.port = Integer.parseInt(System.getProperty("dashboard.port",
                 System.getenv().getOrDefault("DASHBOARD_PORT", String.valueOf(DEFAULT_PORT))));
-        String t = System.getenv("DASHBOARD_TOKEN");
+        String t = System.getProperty("dashboard.token",
+                System.getenv("DASHBOARD_TOKEN"));
         this.token = (t != null && !t.isBlank()) ? t : null;
     }
 
@@ -114,6 +115,10 @@ public class WebDashboardListener implements RuntimeListener {
     /** 启动内嵌 HTTP 服务器（守护线程，不阻止 JVM 退出）。 */
     public void start() {
         if (server != null) return;
+        if (token == null && !isLoopbackHost(host)) {
+            logger.error("WebDashboard 拒绝启动：非本机监听必须配置 DASHBOARD_TOKEN");
+            return;
+        }
         try {
             server = HttpServer.create(new InetSocketAddress(host, port), 0);
             server.setExecutor(Executors.newFixedThreadPool(2, r -> {
@@ -204,8 +209,9 @@ public class WebDashboardListener implements RuntimeListener {
     /** 鉴权检查。未配置 token 时直接放行。 */
     private boolean checkAuth(HttpExchange ex) throws IOException {
         if (token == null) return true;
-        String qt = parseQuery(ex, "token");
-        if (token.equals(qt)) return true;
+        String supplied = ex.getRequestHeaders().getFirst("X-Dashboard-Token");
+        if (supplied == null) supplied = parseQuery(ex, "token");
+        if (token.equals(supplied)) return true;
         byte[] body = "{\"error\":\"unauthorized\"}".getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(401, body.length);
@@ -213,6 +219,13 @@ public class WebDashboardListener implements RuntimeListener {
             os.write(body);
         }
         return false;
+    }
+
+    private static boolean isLoopbackHost(String value) {
+        return "localhost".equalsIgnoreCase(value)
+                || "127.0.0.1".equals(value)
+                || "::1".equals(value)
+                || "[::1]".equals(value);
     }
 
     private void serveHtml(HttpExchange ex) throws IOException {

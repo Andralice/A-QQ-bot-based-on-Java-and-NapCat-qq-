@@ -257,7 +257,7 @@ public class BaiLianService {
     private final Map<String, Long> lastClearTime = new ConcurrentHashMap<>();
 
     // === 主动插话控制（与 ConversationStateStore 共享） ===
-    final Map<String, List<Long>> groupReactionHistory = new ConcurrentHashMap<>();
+    final Map<String, Deque<Long>> groupReactionHistory = new ConcurrentHashMap<>();
     private final AIDatabaseService aiDatabaseService = new AIDatabaseService();
 
 
@@ -269,7 +269,7 @@ public class BaiLianService {
                 userThreads, groupContexts, pendingAwaits, groupReactionHistory);
     }
     // === 新增：糖果熊发言频率控制（每分钟上限）===
-    private final Map<String, List<Long>> botMessageHistory = new ConcurrentHashMap<>(); // groupId -> 时间戳列表
+    private final Map<String, Deque<Long>> botMessageHistory = new ConcurrentHashMap<>(); // groupId -> 时间戳列表
     private static final int MAX_MESSAGES_PER_MINUTE = 10; // 每分钟最多发言次数
 
     // === 对话线程追踪（与 ConversationStateStore 共享） ===
@@ -277,7 +277,6 @@ public class BaiLianService {
     final Map<String, Deque<ContextEvent>> groupContexts = new ConcurrentHashMap<>();
     private final ThreadLocal<String> pendingImageData = new ThreadLocal<>(); // AIHandler 设置图片数据，generate() 消费
     private final ThreadLocal<Boolean> suppressSessionWrite = ThreadLocal.withInitial(() -> false); // PR4: 控制 generate() 是否写 sessions
-    private final ThreadLocal<String> deferredImgData = new ThreadLocal<>(); // PR4: 延迟提交的图片数据
 
     /** 待处理文件缓存 — key = sessionKey(group_xxx_yyy / private_xxx), value = 文件元数据列表 */
     private final Map<String, List<Map<String, String>>> pendingFiles = new ConcurrentHashMap<>();
@@ -433,32 +432,27 @@ public class BaiLianService {
      */
     public void commitGeneration(String sessionId, String userId, String userPrompt,
                                   String reply, String groupId) {
-        String imgData = deferredImgData.get();
-        deferredImgData.remove();
-        if (imgData != null && !imgData.isEmpty()) {
-            aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, 1L, imgData);
-        } else {
-            aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, 1L);
-        }
-
         List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
-        if (lastClearTime.containsKey(sessionId)) {
-            history.clear();
-            lastClearTime.remove(sessionId);
+        synchronized (history) {
+            if (lastClearTime.containsKey(sessionId)) {
+                history.clear();
+                lastClearTime.remove(sessionId);
+            }
+            history.add(new Message("user", userPrompt));
+            history.add(new Message("assistant", reply));
         }
-        history.add(new Message("user", userPrompt));
-        history.add(new Message("assistant", reply));
 
         if (groupId != null) {
             recordUserInteraction(groupId, userId, reply);
-            recordGroupContext(groupId, userId, "糖果熊", reply, "ai_reply");
             aiDatabaseService.updateConversationThread(groupId, userId, reply);
 
-            List<Long> msgHistory = botMessageHistory.computeIfAbsent(groupId, k -> new ArrayList<>());
-            long now = System.currentTimeMillis();
-            msgHistory.removeIf(ts -> now - ts > 60_000);
-            if (msgHistory.size() < MAX_MESSAGES_PER_MINUTE) {
-                msgHistory.add(now);
+            Deque<Long> msgHistory = botMessageHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
+            synchronized (msgHistory) {
+                long now = System.currentTimeMillis();
+                msgHistory.removeIf(ts -> now - ts > 60_000);
+                if (msgHistory.size() < MAX_MESSAGES_PER_MINUTE) {
+                    msgHistory.addLast(now);
+                }
             }
         }
     }
@@ -585,36 +579,28 @@ public class BaiLianService {
 
         try {
             Long isagent = 1L;
-            String imgData = pendingImageData.get();
             pendingImageData.remove();
             boolean suppress = suppressSessionWrite.get();
-            if (!suppress) {
-                if (imgData != null && !imgData.isEmpty()) {
-                    aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, isagent, imgData);
-                } else {
-                    aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, isagent);
-                }
-            } else {
-                deferredImgData.set(imgData); // 保存图片数据，供 commitGeneration() 使用
-            }
 
             List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
 
-            if (lastClearTime.containsKey(sessionId)) {
-                history.clear();
-                lastClearTime.remove(sessionId);
-            } else if (!history.isEmpty()) {
-                // 跨段清理：最后一条消息距今超过 4 小时，视为新的一段对话（避免"bot 对昨天/前天产生惊讶"）
-                long now = System.currentTimeMillis();
-                long lastTs = history.get(history.size() - 1).timestamp;
-                if (now - lastTs > 4 * 60 * 60 * 1000L) {
+            synchronized (history) {
+                if (lastClearTime.containsKey(sessionId)) {
                     history.clear();
-                    logger.debug("session 跨段清理（>4h）: sessionId={}, lastTs={}", sessionId, lastTs);
+                    lastClearTime.remove(sessionId);
+                } else if (!history.isEmpty()) {
+                    // 跨段清理：最后一条消息距今超过 4 小时，视为新的一段对话
+                    long now = System.currentTimeMillis();
+                    long lastTs = history.get(history.size() - 1).timestamp;
+                    if (now - lastTs > 4 * 60 * 60 * 1000L) {
+                        history.clear();
+                        logger.debug("session 跨段清理（>4h）: sessionId={}, lastTs={}", sessionId, lastTs);
+                    }
                 }
-            }
 
-            if (!suppress) {
-                history.add(new Message("user", userPrompt));
+                if (!suppress) {
+                    history.add(new Message("user", userPrompt));
+                }
             }
 
             // === 构建 PromptContext ===
@@ -761,15 +747,19 @@ public class BaiLianService {
             // 不再自动注入记忆到 prompt —— 关键词匹配 ≠ 语义相关，LLM 自己判断什么时候该查
             List<String> hanlpKeywords = extractKeywords(userPrompt);
 
-            logger.debug("完整请求:{}", systemPrompt);
+            logger.debug("已构建 AI system prompt，sessionId={}, chars={}", sessionId, systemPrompt.length());
 
             List<Map<String, Object>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
 
-            int start = Math.max(0, history.size() - 4);
             java.time.format.DateTimeFormatter shortTs = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
-            for (int i = start; i < history.size(); i++) {
-                Message msg = history.get(i);
+            List<Message> historySnapshot;
+            synchronized (history) {
+                historySnapshot = List.copyOf(history);
+            }
+            int snapshotStart = Math.max(0, historySnapshot.size() - 4);
+            for (int i = snapshotStart; i < historySnapshot.size(); i++) {
+                Message msg = historySnapshot.get(i);
                 String role = "user".equals(msg.role) ? "user" : "assistant";
 
                 String content = msg.content;
@@ -807,7 +797,7 @@ public class BaiLianService {
                     new WeatherTool(userAliasRepo),
                     new UserAffinityTool(userAffinityRepo),
                     new UserAliasTool(userAliasRepo, String.valueOf(BotConfig.getBotQq())),
-                    new SendPrivateTool(botInstance),
+                    new SendPrivateTool(botInstance, userId),
                     new PokeTool(botInstance),
                     new VoiceTool(botInstance, ttsService),
                     new RankTool(),
@@ -817,15 +807,15 @@ public class BaiLianService {
                     new ProfessionPKTool(),
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
-                    new LearnKnowledgeTool(knowledgeService),
+                    new LearnKnowledgeTool(knowledgeService, userId),
                     new SendGroupTool(botInstance),
                     new SendFileTool(botInstance),
                     new QueryFileTool(botInstance, this, userId, sessionId),
                     new SearchHistoryTool(ltmRepo),
-                    new RememberFactTool(ltmRepo),
+                    new RememberFactTool(ltmRepo, userId, groupId),
                     new EstablishFactTool(ltmRepo),
                     recallMemoryTool,
-                    new ScheduleEventTool(ltmRepo),
+                    new ScheduleEventTool(ltmRepo, userId, groupId),
                     new SendStatusTool(botInstance, groupId, userId),
                     new WebSearchTool(),
                     new SanjiaoTool(botInstance, groupId),
@@ -895,7 +885,8 @@ public class BaiLianService {
             requestBodyObj.put("tool_choice", "auto");
 
             String requestBody = objectMapper.writeValueAsString(requestBodyObj);
-            logger.debug("请求 Gemini API (Model: {}): {}", modelName, requestBody);
+            logger.debug("发送 AI 请求，model={}, sessionId={}, chars={}",
+                    modelName, sessionId, requestBody.length());
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -1230,28 +1221,31 @@ public class BaiLianService {
         }
 
             if (!suppress) {
-                history.add(new Message("assistant", reply));
+                synchronized (history) {
+                    history.add(new Message("assistant", reply));
+                }
 
                 if (groupId != null) {
                     recordUserInteraction(groupId, userId, reply);
-                    recordGroupContext(groupId, userId, "糖果熊", reply, "ai_reply");
                     aiDatabaseService.updateConversationThread(groupId, userId, reply);
 
                     if (!reply.equals("抱歉，刚才走神了...") &&
                             !reply.equals("嗯...再问一次吧") &&
                             !reply.trim().isEmpty()) {
 
-                        List<Long> msgHistory = botMessageHistory.computeIfAbsent(groupId, k -> new ArrayList<>());
-                        long now = System.currentTimeMillis();
+                        Deque<Long> msgHistory = botMessageHistory.computeIfAbsent(
+                                groupId, k -> new ConcurrentLinkedDeque<>());
+                        synchronized (msgHistory) {
+                            long now = System.currentTimeMillis();
+                            msgHistory.removeIf(ts -> now - ts > 60_000);
 
-                        msgHistory.removeIf(ts -> now - ts > 60_000);
+                            if (msgHistory.size() >= MAX_MESSAGES_PER_MINUTE) {
+                                logger.debug("糖果熊在群 {} 发言已达上限，跳过回复", groupId);
+                                return GenerationResult.silent(toolCalls, 0);
+                            }
 
-                        if (msgHistory.size() >= MAX_MESSAGES_PER_MINUTE) {
-                            logger.debug("糖果熊在群 {} 发言已达上限，跳过回复", groupId);
-                            return GenerationResult.silent(toolCalls, 0);
+                            msgHistory.addLast(now);
                         }
-
-                        msgHistory.add(now);
                     }
                 }
             }
@@ -1676,14 +1670,20 @@ public class BaiLianService {
     // ===== 速率控制（public — AIHandler/StateStore 调用） =====
 
     public boolean canReact(String groupId) {
-        List<Long> history = groupReactionHistory.computeIfAbsent(groupId, k -> new ArrayList<>());
-        history.removeIf(ts -> System.currentTimeMillis() - ts > 300_000);
-        return history.size() < 10;
+        Deque<Long> history = groupReactionHistory.computeIfAbsent(
+                groupId, k -> new ConcurrentLinkedDeque<>());
+        synchronized (history) {
+            history.removeIf(ts -> System.currentTimeMillis() - ts > 300_000);
+            return history.size() < 10;
+        }
     }
 
     public void recordReaction(String groupId) {
-        groupReactionHistory.computeIfAbsent(groupId, k -> new ArrayList<>())
-                .add(System.currentTimeMillis());
+        Deque<Long> history = groupReactionHistory.computeIfAbsent(
+                groupId, k -> new ConcurrentLinkedDeque<>());
+        synchronized (history) {
+            history.addLast(System.currentTimeMillis());
+        }
     }
 
     // ===== 群消息记录 =====

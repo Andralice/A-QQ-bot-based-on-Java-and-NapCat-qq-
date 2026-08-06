@@ -16,6 +16,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,6 +38,7 @@ public class SelfEvolveTool implements Tool {
     private final WorkspaceManager workspaceManager;
 
     private static final int COMPILE_TIMEOUT_SECONDS = 120;
+    private static final ReentrantLock EVOLUTION_LOCK = new ReentrantLock();
 
     public SelfEvolveTool() {
         this.realUserId = "0";
@@ -128,6 +131,12 @@ public class SelfEvolveTool implements Tool {
         if (oldSnippet == null || oldSnippet.isBlank()) return "请指定 old_snippet";
         if (newSnippet == null) newSnippet = "";
         if (reason == null || reason.isBlank()) return "请填写 reason";
+
+        if (!EVOLUTION_LOCK.tryLock()) {
+            return "当前已有自我进化任务正在执行，请等待该任务完成后再试。";
+        }
+
+        try {
 
         // ---- 安全检查：禁止修改配置文件 ----
         String normalized = targetFile.replace('\\', '/');
@@ -240,7 +249,11 @@ public class SelfEvolveTool implements Tool {
 
             // ---- Step 8: 应用沙箱修改到真实项目 ----
             try {
-                workspaceManager.apply();
+                String applyResult = workspaceManager.apply();
+                if (!"已应用".equals(applyResult)) {
+                    recordEvolve(targetFile, reason, "apply_fail", applyResult, false);
+                    return "应用修改到项目失败: " + applyResult;
+                }
             } catch (IOException e) {
                 recordEvolve(targetFile, reason, "apply_fail", e.getMessage(), false);
                 return "应用修改到项目失败: " + e.getMessage();
@@ -250,13 +263,7 @@ public class SelfEvolveTool implements Tool {
             String jarName = detectJarName();
             String os = System.getProperty("os.name", "").toLowerCase();
 
-            Path targetJar = projectRoot.resolve("target").resolve(jarName);
-            if (!Files.exists(targetJar)) {
-                Path fallback = projectRoot.resolve(jarName);
-                if (Files.exists(fallback)) {
-                    targetJar = fallback;
-                }
-            }
+            Path targetJar = sandboxRoot.resolve("target").resolve(jarName);
 
             if (Files.exists(targetJar)) {
                 if (!os.contains("win")) {
@@ -268,12 +275,15 @@ public class SelfEvolveTool implements Tool {
                     }
                     Files.copy(targetJar, serverJar, StandardCopyOption.REPLACE_EXISTING);
                     logger.info("JAR 已部署到: {}", serverJar);
+                } else {
+                    Path localTargetDir = projectRoot.resolve("target");
+                    Files.createDirectories(localTargetDir);
+                    Files.copy(targetJar, localTargetDir.resolve(jarName), StandardCopyOption.REPLACE_EXISTING);
                 }
             } else {
                 return "打包完成但未找到 JAR 文件。\n"
-                        + "在以下位置均未找到 " + jarName + ":\n"
-                        + "  - " + projectRoot.resolve("target").resolve(jarName) + "\n"
-                        + "  - " + projectRoot.resolve(jarName) + "\n"
+                        + "在沙箱中未找到 " + jarName + ":\n"
+                        + "  - " + targetJar + "\n"
                         + "请检查 mvn package 是否正确执行，或手动检查 target/ 目录。";
             }
 
@@ -320,6 +330,9 @@ public class SelfEvolveTool implements Tool {
             // 无论成功失败，丢弃沙箱
             workspaceManager.discard();
         }
+        } finally {
+            EVOLUTION_LOCK.unlock();
+        }
     }
 
     private int countOccurrences(String haystack, String needle) {
@@ -342,12 +355,21 @@ public class SelfEvolveTool implements Tool {
             pb.directory(dir.toFile());
             pb.redirectErrorStream(true);
             Process p = pb.start();
-            String output = new String(p.getInputStream().readAllBytes());
-            p.waitFor(30, TimeUnit.SECONDS);
+            CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> readOutput(p));
+            boolean finished = p.waitFor(30, TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                outputFuture.cancel(true);
+                throw new IllegalStateException("命令超时（>30秒）: " + String.join(" ", cmd));
+            }
+            String output = outputFuture.join();
+            if (p.exitValue() != 0) {
+                throw new IllegalStateException("命令退出码 " + p.exitValue() + ": " + summarize(output));
+            }
             return output;
         } catch (Exception e) {
             logger.warn("命令执行失败: {}", String.join(" ", cmd), e);
-            return "";
+            throw new IllegalStateException("命令执行失败: " + String.join(" ", cmd) + " — " + e.getMessage(), e);
         }
     }
 
@@ -357,12 +379,14 @@ public class SelfEvolveTool implements Tool {
             pb.directory(dir.toFile());
             pb.redirectErrorStream(true);
             Process p = pb.start();
+            CompletableFuture<String> outputFuture = CompletableFuture.supplyAsync(() -> readOutput(p));
             boolean finished = p.waitFor(COMPILE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
+                outputFuture.cancel(true);
                 return new CmdResult(false, "", true);
             }
-            String output = new String(p.getInputStream().readAllBytes());
+            String output = outputFuture.join();
             int exitCode = p.exitValue();
             boolean ok = exitCode == 0;
             if (!ok) {
@@ -373,6 +397,20 @@ public class SelfEvolveTool implements Tool {
             logger.warn("命令执行失败: {} — {}", String.join(" ", cmd), e.getMessage());
             return new CmdResult(false, "命令无法执行: " + e.getMessage(), false);
         }
+    }
+
+    private String readOutput(Process process) {
+        try {
+            return new String(process.getInputStream().readAllBytes());
+        } catch (IOException e) {
+            return "无法读取命令输出: " + e.getMessage();
+        }
+    }
+
+    private String summarize(String output) {
+        if (output == null || output.isBlank()) return "无输出";
+        String trimmed = output.trim();
+        return trimmed.length() > 1000 ? trimmed.substring(0, 1000) + "..." : trimmed;
     }
 
     private String detectJarName() {

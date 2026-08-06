@@ -17,9 +17,13 @@ import org.slf4j.LoggerFactory;
 public class RememberFactTool implements Tool {
     private static final Logger logger = LoggerFactory.getLogger(RememberFactTool.class);
     private final LongTermMemoryRepository repo;
+    private final String currentUserId;
+    private final String currentGroupId;
 
-    public RememberFactTool(LongTermMemoryRepository repo) {
+    public RememberFactTool(LongTermMemoryRepository repo, String currentUserId, String currentGroupId) {
         this.repo = repo;
+        this.currentUserId = currentUserId;
+        this.currentGroupId = currentGroupId;
     }
 
     @Override public String getName() { return "remember_fact"; }
@@ -44,15 +48,15 @@ public class RememberFactTool implements Tool {
                         "content", Map.of("type", "string", "description", "记忆内容，简洁的一句话"),
                         "memory_type", Map.of("type", "string", "description", "类型：fact(事实)/preference(偏好)/event(事件)/relation(关系)"),
                         "keywords", Map.of("type", "string", "description", "关键词，逗号分隔，方便以后检索"),
-                        "importance", Map.of("type", "string", "description", "重要性 1-5，5 为非常重要")
-                ),
-                "required", Arrays.asList("user_id", "group_id", "content"));
+                         "importance", Map.of("type", "string", "description", "重要性 1-5，5 为非常重要")
+                 ),
+                 "required", Arrays.asList("content"));
     }
 
     @Override
     public String execute(Map<String, Object> args) {
-        String userId = (String) args.get("user_id");
-        String groupId = (String) args.get("group_id");
+        String userId = currentUserId;
+        String groupId = currentGroupId;
         String content = (String) args.get("content");
         if (userId == null || content == null || content.isBlank()) return "缺少 user_id 或 content";
 

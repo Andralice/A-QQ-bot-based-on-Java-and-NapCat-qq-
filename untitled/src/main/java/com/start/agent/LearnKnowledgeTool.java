@@ -11,12 +11,12 @@ import java.util.*;
 public class LearnKnowledgeTool implements Tool {
 
     private final KeywordKnowledgeService knowledgeService;
+    private final String realUserId;
 
-    public LearnKnowledgeTool(KeywordKnowledgeService knowledgeService) {
+    public LearnKnowledgeTool(KeywordKnowledgeService knowledgeService, String realUserId) {
         this.knowledgeService = knowledgeService;
+        this.realUserId = realUserId;
     }
-
-    private static final String ADMIN_QQ = "0"; // 请在 application.properties 中设置 admin.qq
 
     @Override public String getName() { return "manage_knowledge"; }
 
@@ -35,8 +35,7 @@ public class LearnKnowledgeTool implements Tool {
                         "pattern", Map.of("type", "string", "description", "问题模式"),
                         "answer", Map.of("type", "string", "description", "回答内容"),
                         "category", Map.of("type", "string", "description", "分类标签"),
-                        "priority", Map.of("type", "string", "description", "优先级 1-10，add/update时用"),
-                        "requester_user_id", Map.of("type", "string", "description", "发起操作的用户QQ")
+                         "priority", Map.of("type", "string", "description", "优先级 1-10，add/update时用")
                 ),
                 "required", Arrays.asList("action"));
     }
@@ -46,21 +45,22 @@ public class LearnKnowledgeTool implements Tool {
         String action = (String) args.get("action");
         if (action == null) return "缺少 action 参数";
 
-        String requesterId = (String) args.get("requester_user_id");
+        boolean isAdmin = realUserId != null
+                && realUserId.equals(String.valueOf(com.start.config.BotConfig.getAdminQq()));
 
         return switch (action) {
             case "add" -> doAdd(args);
             case "update" -> {
-                if (!ADMIN_QQ.equals(requesterId)) yield "只有归儿才能修改知识库哦~";
+                if (!isAdmin) yield "只有归儿才能修改知识库哦~";
                 yield doUpdate(args);
             }
             case "delete" -> {
-                if (!ADMIN_QQ.equals(requesterId)) yield "只有归儿才能删除知识库哦~";
+                if (!isAdmin) yield "只有归儿才能删除知识库哦~";
                 yield doDelete(args);
             }
             case "blacklist_list" -> doBlacklistList();
             case "blacklist_remove" -> {
-                if (!ADMIN_QQ.equals(requesterId)) yield "只有归儿才能移除黑名单哦~";
+                if (!isAdmin) yield "只有归儿才能移除黑名单哦~";
                 yield doBlacklistRemove(args);
             }
             default -> "未知操作: " + action + "，支持 add/update/delete/blacklist_list/blacklist_remove";
