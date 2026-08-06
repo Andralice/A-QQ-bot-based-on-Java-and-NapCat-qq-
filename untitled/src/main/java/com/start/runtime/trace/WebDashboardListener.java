@@ -99,6 +99,7 @@ public class WebDashboardListener implements RuntimeListener {
     private final int port;
     private final String host;
     private final String token;   // null = 不需要鉴权
+    private volatile java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> executorMetricsProvider;
 
     public WebDashboardListener() {
         this.host = System.getProperty("dashboard.host",
@@ -150,6 +151,15 @@ public class WebDashboardListener implements RuntimeListener {
 
     /** 获取当前实例，供 EventBus 注册。 */
     public static WebDashboardListener getInstance() { return instance; }
+
+    /**
+     * 注入 GroupSerialExecutor 指标提供者。BotBootstrap 在 start() 前调用，
+     * 让 /api/system 端点能拿到线程池实时指标。
+     */
+    public void setExecutorMetricsProvider(
+            java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> provider) {
+        this.executorMetricsProvider = provider;
+    }
 
     // ===== RuntimeListener 实现 =====
 
@@ -306,6 +316,32 @@ public class WebDashboardListener implements RuntimeListener {
         o.put("heapMaxMB", rt.maxMemory() / 1024 / 1024);
         o.put("threadCount", ManagementFactory.getThreadMXBean().getThreadCount());
         o.put("activeGroups", groups.size());
+
+        // GroupSerialExecutor 线程池指标
+        java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> provider =
+                executorMetricsProvider;
+        if (provider != null) {
+            try {
+                com.start.service.GroupSerialExecutor.ExecutorMetrics m = provider.get();
+                ObjectNode execNode = mapper.createObjectNode();
+                execNode.put("tasksSubmitted", m.tasksSubmitted);
+                execNode.put("tasksCompleted", m.tasksCompleted);
+                execNode.put("tasksRejected", m.tasksRejected);
+                execNode.put("tasksExpired", m.tasksExpired);
+                execNode.put("tasksActive", m.tasksActive);
+                execNode.put("avgExecutionMs", m.tasksCompleted > 0
+                        ? m.totalExecutionTimeMs / m.tasksCompleted : 0);
+                execNode.put("maxExecutionMs", m.maxExecutionTimeMs);
+                execNode.put("groupQueues", m.groupQueuesCount);
+                execNode.put("groupQueuesSize", m.groupQueuesTotalSize);
+                execNode.put("privateQueueSize", m.privateQueueSize);
+                execNode.put("privateQueueCapacity", m.privateQueueCapacity);
+                execNode.put("privateActiveThreads", m.privateActiveThreads);
+                o.set("executor", execNode);
+            } catch (Exception e) {
+                logger.debug("拉取 executor 指标失败: {}", e.getMessage());
+            }
+        }
 
         // 工具调用排行 Top 15
         ArrayNode tools = mapper.createArrayNode();

@@ -121,6 +121,9 @@ public final class BotBootstrap {
 
     private static void startDashboard(Main bot) {
         WebDashboardListener dashboard = new WebDashboardListener();
+        if (bot.conversationExecutor != null) {
+            dashboard.setExecutorMetricsProvider(() -> bot.conversationExecutor.getMetrics());
+        }
         dashboard.start();
         if (bot.conversationRuntime != null) {
             bot.conversationRuntime.addListener(dashboard);
