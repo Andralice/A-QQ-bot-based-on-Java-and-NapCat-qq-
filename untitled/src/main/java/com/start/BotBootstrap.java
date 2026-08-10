@@ -101,7 +101,7 @@ public final class BotBootstrap {
     /** 启动所有后台定时任务（守护线程）。 */
     public static void startBackgroundTasks(Main bot) {
         // 启动自检（5.1）：必需字段 + OneBot WS URL + AI API Key
-        preflightCheck();
+        validateConfiguration();
 
         // 防刷检测
         bot.spamDetector = new SpamDetector(bot);
@@ -136,8 +136,12 @@ public final class BotBootstrap {
      * 注意：BotConfig 静态初始化阶段已经把未替换的 ${VAR} 占位符 fallback 为空值 / 0，
      * 不会在这里之前抛 NumberFormatException。所有"必填项缺失"的判断集中在这里，
      * 并列出每一项，方便部署时一眼看出少配了什么。
+     *
+     * 在产生外部副作用（数据库连接、迁移、WebSocket 连接）之前校验配置。
+     * Main.main() 会在创建 Main 实例前调用；startBackgroundTasks() 仍会再次调用，
+     * 防止其他启动入口绕过检查。
      */
-    private static void preflightCheck() {
+    public static void validateConfiguration() {
         List<String> missing = collectMissingConfigs(
                 BotConfig.getBotQq(),
                 BotConfig.getBaiLianApiKey(),
@@ -193,6 +197,7 @@ public final class BotBootstrap {
 
     private static void startDashboard(Main bot) {
         WebDashboardListener dashboard = new WebDashboardListener();
+        bot.dashboardListener = dashboard;
         if (bot.conversationExecutor != null) {
             dashboard.setExecutorMetricsProvider(() -> bot.conversationExecutor.getMetrics());
         }

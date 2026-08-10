@@ -249,7 +249,9 @@ public class RankHandler implements MessageHandler {
                     catch (NumberFormatException ignored) {}
                 }
             }
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            logger.warn("幸运值排行榜查询失败，groupId={}", groupId, e);
+        }
         return map.entrySet().stream()
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).toList();
     }
@@ -263,7 +265,9 @@ public class RankHandler implements MessageHandler {
             try (java.sql.ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) map.put(rs.getString("user_id"), rs.getInt("affinity_score"));
             }
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            logger.warn("好感度排行榜查询失败，groupId={}", groupId, e);
+        }
         return map.entrySet().stream()
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).toList();
     }
@@ -281,7 +285,9 @@ public class RankHandler implements MessageHandler {
                     catch (NumberFormatException ignored) {}
                 }
             }
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            logger.warn("职业排行榜查询失败，groupId={}", groupId, e);
+        }
         return map.entrySet().stream()
                 .sorted(Map.Entry.<String, Integer>comparingByValue().reversed()).toList();
     }

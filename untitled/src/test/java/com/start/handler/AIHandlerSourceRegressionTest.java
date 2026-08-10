@@ -25,7 +25,7 @@ class AIHandlerSourceRegressionTest {
     void noLegacySendGroupReplyForGoShenShen() throws Exception {
         String src = readAIHandler();
         // 不应再有 bot.sendGroupReply(groupId, "刚刚走神了...") 无 sessionId 形式
-        assertFalse(src.contains("sendGroupReply(groupId, \"刚刚走神了"),
+        assertFalse(src.contains("sendGroupReply(groupId, \"刚刚走神了，再说一遍？\")"),
                 "AIHandler 仍调用无 sessionId 的 sendGroupReply for fallback 刚刚走神了");
     }
 
@@ -33,7 +33,7 @@ class AIHandlerSourceRegressionTest {
     void noLegacySendReplyForShaoDengYiXia() throws Exception {
         String src = readAIHandler();
         // 不应再有 bot.sendReply(originalMsg, "稍等一下...") 无 sessionId 形式
-        assertFalse(src.contains("sendReply(originalMsg, \"稍等一下"),
+        assertFalse(src.contains("sendReply(originalMsg, \"稍等一下，我在走神...\")"),
                 "AIHandler 仍调用无 sessionId 的 sendReply for fallback 稍等一下");
     }
 

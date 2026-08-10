@@ -534,11 +534,20 @@ public class BaiLianService {
     /** 基于 ConversationSession 的生成入口。 */
     public GenerationResult generate(com.start.runtime.conversation.ConversationSession session) {
         return generate(session.sessionId(), session.userId(), session.userPrompt(),
-                session.groupId(), session.nickname(), session.atUserIds(), session.allowSilence());
+                session.groupId(), session.nickname(), session.atUserIds(), session.allowSilence(),
+                session.excludedPublicMessageIds(), session.event());
     }
 
     /** 带沉默权的生成方法。allowSilence=true 时模型可以输出 <NO_REPLY> 选择沉默。 */
     public GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId, String nickname, List<Long> atUserIds, boolean allowSilence) {
+        return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, allowSilence,
+                Collections.emptySet(), ConversationEvent.NOTHING);
+    }
+
+    private GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId,
+                                      String nickname, List<Long> atUserIds, boolean allowSilence,
+                                      java.util.Set<String> excludedPublicMessageIds,
+                                      ConversationEvent event) {
         logger.info("🧠 AI 调用: sessionId={}, prompt=[{}], ats={}, allowSilence={}", sessionId, userPrompt, atUserIds, allowSilence);
 
         String context = "";
@@ -550,20 +559,10 @@ public class BaiLianService {
             + "session history 已带 [MM-dd HH:mm] 时间戳，请直接看时间戳判断每条消息的时序；"
             + "若看到时间戳跨天/隔夜，说明是新的一天。";
 
-        if (groupId != null) {
+        int publicContextLimit = publicContextLimit(event);
+        if (groupId != null && publicContextLimit > 0) {
             Deque<PublicMessage> recent = getPublicGroupHistory(groupId);
-            if (recent != null && !recent.isEmpty()) {
-                StringBuilder sb = new StringBuilder("\n\n【群内最近讨论】（过去 10 分钟内的群聊上下文，超过 10 分钟的消息已被清理）\n");
-                List<PublicMessage> list = new ArrayList<>(recent);
-                int start = Math.max(0, list.size() - 10);
-                for (int i = start; i < list.size(); i++) {
-                    PublicMessage m = list.get(i);
-                    String timeLabel = formatRelativeTime(m.timestamp);
-                    sb.append("[").append(timeLabel).append("] ");
-                    sb.append(m.nickname).append("(").append(m.userId).append(")").append("：").append(m.content).append("\n");
-                }
-                publicGroupContext = sb.toString().trim();
-            }
+            publicGroupContext = buildPublicGroupContext(recent, publicContextLimit, excludedPublicMessageIds);
         }
 
         context = profileProvider.getProfileContext(userId, groupId);
@@ -1655,7 +1654,7 @@ public class BaiLianService {
         return scene.activeThreads().get(0).getId();
     }
 
-    private String formatRelativeTime(long timestamp) {
+    private static String formatRelativeTime(long timestamp) {
         java.time.LocalDateTime msgTime = java.time.LocalDateTime.ofInstant(
                 java.time.Instant.ofEpochMilli(timestamp), ZoneId.of("Asia/Shanghai"));
         java.time.LocalDate today = java.time.LocalDate.now(ZoneId.of("Asia/Shanghai"));
@@ -1738,12 +1737,14 @@ public class BaiLianService {
     private final Map<String, Deque<PublicMessage>> publicGroupHistory = new ConcurrentHashMap<>();
 
     public static class PublicMessage {
+        public final String messageId;
         public final String userId;
         public final String nickname;
         public final String content;
         public final long timestamp;
 
-        public PublicMessage(String userId, String nickname, String content) {
+        public PublicMessage(String messageId, String userId, String nickname, String content) {
+            this.messageId = messageId == null ? "" : messageId;
             this.userId = userId;
             this.nickname = nickname;
             this.content = content;
@@ -1753,6 +1754,50 @@ public class BaiLianService {
 
     // 提供方法供 AIHandler 调用
     public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message) {
+        recordPublicGroupMessage(groupId, userId, nickname, message, "");
+    }
+
+    /**
+     * 按触发原因选择群背景范围。追问/回复机器人时，当前用户会话已经包含所需上下文，
+     * 再注入整段群聊只会增加无关消息和重复信息。
+     */
+    static int publicContextLimit(ConversationEvent event) {
+        if (event == null) return 0;
+        return switch (event) {
+            case PROBABILISTIC -> 5;
+            case MENTION, PASSIVE_TRIGGER -> 3;
+            case FOLLOW_UP, AI_COMMENTED, AWAIT_REPLY, NOTHING -> 0;
+        };
+    }
+
+    /** 构建有限的群背景；当前轮消息通过 message_id 排除，避免重复注入。 */
+    static String buildPublicGroupContext(Deque<PublicMessage> recent, int limit, Set<String> excludedIds) {
+        if (recent == null || recent.isEmpty() || limit <= 0) return "";
+        Set<String> excluded = excludedIds == null ? Collections.emptySet() : excludedIds;
+        List<PublicMessage> list = new ArrayList<>(recent);
+        List<PublicMessage> selected = new ArrayList<>();
+        for (int i = list.size() - 1; i >= 0 && selected.size() < limit; i--) {
+            PublicMessage message = list.get(i);
+            if (!excluded.contains(message.messageId)) {
+                selected.add(message);
+            }
+        }
+        Collections.reverse(selected);
+        StringBuilder sb = new StringBuilder();
+        int included = 0;
+        for (PublicMessage m : selected) {
+            if (included == 0) {
+                sb.append("【群内最近讨论】（仅作为背景，不代表当前任务；不能仅凭消息数量判断刷屏）\n");
+            }
+            sb.append("[").append(formatRelativeTime(m.timestamp)).append("] ")
+                    .append(m.nickname).append("(").append(m.userId).append(")：")
+                    .append(m.content).append("\n");
+            included++;
+        }
+        return sb.toString().trim();
+    }
+
+    public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message, String messageId) {
         if (groupId == null || message.trim().isEmpty()) return;
 
         // 过滤机器人自己的消息（避免重复）
@@ -1769,7 +1814,7 @@ public class BaiLianService {
             history.pollFirst();
         }
 
-        history.offerLast(new PublicMessage(userId, nickname, message));
+        history.offerLast(new PublicMessage(messageId, userId, nickname, message));
     }
     /** 记录糖果熊自己的群发言到公开历史，使 LLM 能看到自己上一轮说了什么 */
     public void recordBotOwnGroupMessage(String groupId, String message) {
@@ -1781,7 +1826,7 @@ public class BaiLianService {
         if (history.size() >= 10) {
             history.pollFirst();
         }
-        history.offerLast(new PublicMessage(String.valueOf(BOT_QQ), "糖果熊", message));
+        history.offerLast(new PublicMessage("", String.valueOf(BOT_QQ), "糖果熊", message));
     }
 
     public Deque<PublicMessage> getPublicGroupHistory(String groupId) {

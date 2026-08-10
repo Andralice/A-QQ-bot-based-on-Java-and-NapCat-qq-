@@ -1,6 +1,7 @@
 package com.start.service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -13,6 +14,7 @@ public class ConversationState {
     private final AtomicLong messageRevision = new AtomicLong(0);
     private final AtomicLong generation = new AtomicLong(0);
     private final List<MessageEntry> pendingMessages = new ArrayList<>();
+    private final List<String> pendingMessageIds = new ArrayList<>();
     private final List<ImageInfo> imageInfos = new ArrayList<>();
     private final List<String> linksToFetch = new ArrayList<>();
     private volatile int regenerateCount = 0;
@@ -40,8 +42,13 @@ public class ConversationState {
     public void markSubmitted() { this.submitted = true; }
 
     public void addMessage(String text) {
+        addMessage(text, null);
+    }
+
+    public void addMessage(String text, String messageId) {
         synchronized (pendingMessages) {
             pendingMessages.add(new MessageEntry(text, System.currentTimeMillis()));
+            pendingMessageIds.add(messageId);
         }
     }
 
@@ -66,6 +73,14 @@ public class ConversationState {
     public List<MessageEntry> getPendingMessages() {
         synchronized (pendingMessages) {
             return List.copyOf(pendingMessages);
+        }
+    }
+
+    /** 获取当前 buffer 对应的 OneBot 消息 ID，用于公共上下文去重。 */
+    public List<String> getPendingMessageIds() {
+        synchronized (pendingMessages) {
+            // Keep positional alignment with pendingMessages; legacy callers may have no ID.
+            return Collections.unmodifiableList(new ArrayList<>(pendingMessageIds));
         }
     }
 
