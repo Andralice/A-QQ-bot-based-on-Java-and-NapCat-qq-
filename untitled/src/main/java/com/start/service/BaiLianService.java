@@ -557,6 +557,8 @@ public class BaiLianService {
             + "\n调用 search_chat_history / recall_memory 查日期时，用 yyyy-MM-dd 格式。今天=" + getTodayDateStr()
             + "（昨天/前天请自行 -1d / -2d）。"
             + "session history 已带 [MM-dd HH:mm] 时间戳，请直接看时间戳判断每条消息的时序；"
+            + "这些时间信息和历史消息前缀仅供内部判断时间和消息顺序，禁止在正常回复中输出、复述或模仿任何时间戳前缀；"
+            + "除非用户明确要求查询或说明时间。"
             + "若看到时间戳跨天/隔夜，说明是新的一天。";
 
         int publicContextLimit = publicContextLimit(event);
