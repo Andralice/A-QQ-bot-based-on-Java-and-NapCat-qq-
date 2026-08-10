@@ -16,6 +16,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import com.start.repository.UserAffinityRepository;
 import com.start.service.*;
+import com.start.runtime.trace.WebDashboardListener;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 import org.slf4j.Logger;
@@ -119,6 +120,9 @@ public class Main extends WebSocketClient {
     /** 自动异常监控服务 —— 定时扫描日志 ERROR，触发 LLM 自审自修。 */
     ErrorMonitorService errorMonitorService;
 
+    /** 由 BotBootstrap 启动的 Dashboard，用于统一释放 HTTP 资源。 */
+    WebDashboardListener dashboardListener;
+
     // ===== 异步请求管理 =====
 
     /**
@@ -126,6 +130,7 @@ public class Main extends WebSocketClient {
      * 使用 ConcurrentHashMap 保证线程安全。
      */
     private final Map<String, CompletableFuture<JsonNode>> pendingRequests = new ConcurrentHashMap<>();
+    private volatile boolean shuttingDown;
 
 
     // ===== 构造函数：初始化核心服务 =====
@@ -357,6 +362,9 @@ public class Main extends WebSocketClient {
         health.setWebSocketConnected(false);
         health.lastDisconnectAt = System.currentTimeMillis();
         failPendingRequests(new IllegalStateException("OneBot WebSocket 已断开"));
+        if (shuttingDown) {
+            return;
+        }
         reconnectScheduler.schedule(this::attemptReconnect, 5, TimeUnit.SECONDS);
     }
 
@@ -639,13 +647,33 @@ public class Main extends WebSocketClient {
      * 主方法：创建机器人实例，连接 WebSocket 并初始化服务。
      */
     public static void main(String[] args) throws Exception {
+        // 必须先检查配置，再初始化数据库/服务并连接 OneBot，避免缺配置时产生外部副作用。
+        BotBootstrap.validateConfiguration();
         Main bot = new Main(new URI(BotConfig.getWsUrl()));
+        Runtime.getRuntime().addShutdownHook(new Thread(bot::shutdown, "Bot-Shutdown"));
         bot.connect();
         bot.init();
         // 保持主线程运行
         while (!bot.isClosed()) {
             Thread.sleep(1000);
         }
+    }
+
+    /** 释放机器人持有的网络、调度和数据库资源。可重复调用。 */
+    public void shutdown() {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        reconnectScheduler.shutdownNow();
+        failPendingRequests(new IllegalStateException("机器人正在关闭"));
+        if (conversationExecutor != null) conversationExecutor.shutdown();
+        if (dashboardListener != null) dashboardListener.stop();
+        ToolAuditService.shutdown();
+        try {
+            if (!isClosed()) close();
+        } catch (Exception e) {
+            logger.debug("关闭 OneBot WebSocket 失败: {}", e.getMessage());
+        }
+        DatabaseConfig.close();
     }
 
     /** 计算到下一个凌晨 3:00 的毫秒数 */

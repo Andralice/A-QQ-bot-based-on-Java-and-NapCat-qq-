@@ -1,11 +1,14 @@
 package com.start.runtime.conversation;
 
+import com.start.service.SessionId;
+
 import com.start.service.ConversationEvent;
 import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationMetrics;
 import com.start.service.GenerationResult;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * 一次群聊对话的完整生命周期状态。
@@ -23,6 +26,7 @@ public class ConversationSession {
     private final ConversationEvent event;
     private final ConversationMetrics.Snapshot metricsSnapshot;
     private final long startMs;
+    private final Set<String> excludedPublicMessageIds;
 
     private GenerationResult result;
     private long latencyMs;
@@ -39,6 +43,7 @@ public class ConversationSession {
         this.event = b.event;
         this.metricsSnapshot = b.metricsSnapshot;
         this.startMs = b.startMs;
+        this.excludedPublicMessageIds = b.excludedPublicMessageIds;
     }
 
     // ---- getters ----
@@ -54,10 +59,11 @@ public class ConversationSession {
     public ConversationEvent event() { return event; }
     public ConversationMetrics.Snapshot metricsSnapshot() { return metricsSnapshot; }
     public long startMs() { return startMs; }
+    public Set<String> excludedPublicMessageIds() { return excludedPublicMessageIds; }
     public GenerationResult result() { return result; }
     public long latencyMs() { return latencyMs; }
 
-    public String sessionId() { return "group_" + groupId + "_" + userId; }
+    public String sessionId() { return SessionId.groupConversation(groupId, userId); }
 
     /** 标记生成完成 */
     public void complete(GenerationResult r, long latency) {
@@ -86,6 +92,7 @@ public class ConversationSession {
         private ConversationEvent event = ConversationEvent.NOTHING;
         private ConversationMetrics.Snapshot metricsSnapshot = ConversationMetrics.Snapshot.EMPTY;
         private long startMs = System.currentTimeMillis();
+        private Set<String> excludedPublicMessageIds = Set.of();
 
         Builder(String groupId, String userId, String nickname) {
             this.groupId = groupId;
@@ -101,6 +108,10 @@ public class ConversationSession {
         public Builder event(ConversationEvent v) { event = v; return this; }
         public Builder metricsSnapshot(ConversationMetrics.Snapshot v) { metricsSnapshot = v; return this; }
         public Builder startMs(long v) { startMs = v; return this; }
+        public Builder excludedPublicMessageIds(Set<String> v) {
+            excludedPublicMessageIds = v == null ? Set.of() : Set.copyOf(v);
+            return this;
+        }
 
         /** 从 InterpretResult 填充事件相关字段 */
         public Builder fromInterpret(ConversationInterpreter.InterpretResult r) {

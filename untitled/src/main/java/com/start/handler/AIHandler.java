@@ -124,6 +124,7 @@ public class AIHandler implements MessageHandler {
 
         String plainText = MessageUtil.extractPlainText(msg.path("message")).trim();
         String rawMessage = msg.path("raw_message").asText();
+        String messageId = msg.path("message_id").asText("");
         String senderNick = msg.path("sender").path("card").asText();
         if (senderNick.isEmpty()) {
             senderNick = msg.path("sender").path("nickname").asText();
@@ -162,7 +163,8 @@ public class AIHandler implements MessageHandler {
                 String.valueOf(groupId),
                 String.valueOf(userId),
                 senderNick,
-                plainText
+                plainText,
+                messageId
         );
 
         String gid = String.valueOf(groupId);
@@ -178,7 +180,7 @@ public class AIHandler implements MessageHandler {
 
         // 缓冲消息到 ConversationState（WebSocket 线程）
         ConversationState conv = conversationManager.getOrCreate(gid, uid);
-        conv.addMessage(plainText);
+        conv.addMessage(plainText, messageId);
         if (!imageInfos.isEmpty()) {
             for (Map<String, String> img : imageInfos) {
                 conv.addImageInfo(img.get("url"), img.get("file"));
@@ -375,6 +377,9 @@ public class AIHandler implements MessageHandler {
                         .revision(state.getMessageRevision())
                         .event(event)
                         .metricsSnapshot(snap)
+                        .excludedPublicMessageIds(state.getPendingMessageIds().stream()
+                                .filter(id -> id != null && !id.isBlank())
+                                .collect(java.util.stream.Collectors.toSet()))
                         .startMs(startMs)
                         .build();
 
