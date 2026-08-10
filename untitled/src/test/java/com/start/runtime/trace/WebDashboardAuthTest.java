@@ -28,11 +28,14 @@ class WebDashboardAuthTest {
 
     private String originalHost;
     private String originalToken;
+    private String originalPort;
 
     @BeforeEach
     void saveSystemProps() {
         originalHost = System.getProperty("dashboard.host");
         originalToken = System.getProperty("dashboard.token");
+        originalPort = System.getProperty("dashboard.port");
+        System.setProperty("dashboard.port", "0");
     }
 
     @AfterEach
@@ -41,6 +44,8 @@ class WebDashboardAuthTest {
         else System.clearProperty("dashboard.host");
         if (originalToken != null) System.setProperty("dashboard.token", originalToken);
         else System.clearProperty("dashboard.token");
+        if (originalPort != null) System.setProperty("dashboard.port", originalPort);
+        else System.clearProperty("dashboard.port");
     }
 
     @Test
