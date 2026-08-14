@@ -7,6 +7,7 @@ import com.start.handler.DailyProfessionHandler;
 import com.start.handler.HandlerRegistry;
 import com.start.runtime.ConversationRuntime;
 import com.start.runtime.conversation.ConversationRuntimeConfig;
+import com.start.runtime.sticker.StickerHarvesterListener;
 import com.start.runtime.trace.DecisionTraceListener;
 import com.start.runtime.trace.MetricsListener;
 import com.start.runtime.trace.WebDashboardListener;
@@ -58,6 +59,9 @@ public final class BotBootstrap {
 
         // TTS
         bot.ttsService = new TtsService();
+        if (BotConfig.isVolcTtsEnabled()) {
+            bot.ttsService.setVolcTtsEngine(new VolcTtsEngine());
+        }
 
         // 大模型服务
         bot.baiLianService = new BaiLianService(bot.keywordKnowledgeService, bot.userAffinityRepo, bot.ttsService);
@@ -85,6 +89,10 @@ public final class BotBootstrap {
         runtime.addListener(new MetricsListener(metrics));
         runtime.addListener(new DecisionTraceListener());
 
+        // 表情包自动入库服务 + Listener（消费 ImageDescribed 事件）
+        StickerIngestService.init().setBaiLianService(bot.baiLianService);
+        runtime.addListener(new StickerHarvesterListener());
+
         // 运行时配置
         ConversationRuntimeConfig config = ConversationRuntimeConfig.defaults();
 
@@ -106,6 +114,8 @@ public final class BotBootstrap {
         // 防刷检测
         bot.spamDetector = new SpamDetector(bot);
         logger.info("SpamDetector 初始化完成");
+
+        bot.handlerRegistry.startProactiveMonitor(bot);
 
         // 糖果熊知识种子
         bot.keywordKnowledgeService.seedCandyBearKnowledge();

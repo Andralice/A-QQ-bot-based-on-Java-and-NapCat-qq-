@@ -36,6 +36,8 @@ public class PromptContext {
     String promptPatch;
     List<Long> atUserIds;
     long botQq;
+    /** 群成员 QQ → 显示名（@ 时直接拿 userId）。来自 OneBotWsService.getGroupMemberDisplayNamesAsync。 */
+    Map<String, String> groupMembers;
 
     public PromptContext() {}
 
@@ -66,4 +68,5 @@ public class PromptContext {
     public PromptContext promptPatch(String v) { this.promptPatch = v; return this; }
     public PromptContext atUserIds(List<Long> v) { this.atUserIds = v; return this; }
     public PromptContext botQq(long v) { this.botQq = v; return this; }
+    public PromptContext groupMembers(Map<String, String> v) { this.groupMembers = v; return this; }
 }

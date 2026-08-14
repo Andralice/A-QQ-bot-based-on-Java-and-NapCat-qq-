@@ -22,6 +22,10 @@ public interface ConversationStateStore {
     boolean canReact(String groupId);
     void recordReaction(String groupId);
 
+    // === 主动插话负反馈冷却 ===
+    boolean isNegativeCooldown(String groupId);
+    void setNegativeCooldown(String groupId, long durationMs);
+
     // === 内嵌类型 ===
 
     /** 追问窗口记录 */

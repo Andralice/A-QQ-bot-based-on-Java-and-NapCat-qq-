@@ -49,6 +49,12 @@ public class TtsService {
     private volatile String cachedToken;
     private volatile long tokenExpireAt;
 
+    /**
+     * 火山引擎 TTS 引擎（可选）。
+     * 如果设置且配置完整，synthesize() 优先调用它，失败自动 fallback 到 text-to-speech.cn。
+     */
+    private VolcTtsEngine volcTtsEngine;
+
     public TtsService() {
         this.defaultVoice = BotConfig.getTtsDefaultVoice();
         this.requestTimeoutMs = BotConfig.getTtsTimeoutMs();
@@ -65,14 +71,36 @@ public class TtsService {
     // ==================== 公开 API ====================
 
     public byte[] synthesize(String text) {
-        return synthesize(text, defaultVoice);
+        return synthesize(text, defaultVoice, null);
     }
 
     public byte[] synthesize(String text, String voice) {
+        return synthesize(text, voice, null);
+    }
+
+    /**
+     * 合成语音（火山引擎豆包语音 2.0 支持 instruct / 语音指令）。
+     *
+     * @param text     待合成文本
+     * @param voice    备用音色（仅在 fallback 到 text-to-speech.cn 时使用）
+     * @param instruct 语音指令（撒娇/吐槽/安慰 等），仅传给火山引擎。
+     *                 复刻音色（S_ZSLtoFZb2）官方文档说可能不支持，失败时自动 fallback。
+     */
+    public byte[] synthesize(String text, String voice, String instruct) {
         if (text == null || text.isBlank()) {
             logger.warn("TTS text is empty");
             return null;
         }
+
+        // 火山引擎优先（火山引擎没有 voice 概念，复刻音色是固定的）
+        if (volcTtsEngine != null && volcTtsEngine.isReady()) {
+            byte[] volcAudio = volcTtsEngine.synthesize(text, instruct);
+            if (volcAudio != null && volcAudio.length > 0) {
+                return volcAudio;
+            }
+            logger.warn("VolcTTS 失败，fallback 到 text-to-speech.cn: text='{}', instruct='{}'", text, instruct);
+        }
+
         if (text.length() > 300) text = text.substring(0, 300);
 
         int retry = 0;
@@ -238,5 +266,16 @@ public class TtsService {
 
     private static String urlEncode(String s) {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 注入火山引擎 TTS。设置后 synthesize 优先调用火山引擎，失败 fallback 到 text-to-speech.cn。
+     * 如果不调用此方法，则保持纯 text-to-speech.cn 行为（向后兼容）。
+     */
+    public void setVolcTtsEngine(VolcTtsEngine volcTtsEngine) {
+        this.volcTtsEngine = volcTtsEngine;
+        if (volcTtsEngine != null && volcTtsEngine.isReady()) {
+            logger.info("✅ TtsService 启用火山引擎声音复刻（fallback: text-to-speech.cn）");
+        }
     }
 }

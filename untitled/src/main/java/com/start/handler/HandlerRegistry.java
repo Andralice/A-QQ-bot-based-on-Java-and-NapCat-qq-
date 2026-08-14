@@ -28,6 +28,7 @@ public class HandlerRegistry {
     private final EggGroupDataCenter dataCenter = new EggGroupDataCenter();
     private final TravelingMerchantHandler merchantHandler;
     private final MerchantApiService merchantApiService;
+    private final AIHandler aiHandler;
     public HandlerRegistry(BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot, ServerAdminService shellService, ConversationManager conversationManager, ConversationRuntime runtime, ConversationRuntimeConfig config) {
         // 远行商人：数据库 + API
         MerchantRepository merchantRepo = new MerchantRepository();
@@ -55,7 +56,13 @@ public class HandlerRegistry {
         var stateStore = baiLianService.createSharedStateStore();
         ConversationInterpreter interpreter = new ConversationInterpreter(
                 stateStore, baiLianService.getAiDatabaseService());
-        handlers.add(new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, runtime, config));
+        this.aiHandler = new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, runtime, config);
+        handlers.add(aiHandler);
+    }
+
+    /** Starts the deferred interjection and quiet-group monitor after bootstrap completes. */
+    public void startProactiveMonitor(Main bot) {
+        aiHandler.startProactiveMonitor(bot);
     }
 
     public void dispatch(JsonNode message, Main bot) {

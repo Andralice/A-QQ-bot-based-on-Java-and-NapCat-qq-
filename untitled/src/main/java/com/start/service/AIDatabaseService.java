@@ -217,10 +217,11 @@ public class AIDatabaseService {
         String topics = extractTopics(message);
         logger.debug("candyBear: {}, groupId: {}", topics, interestTopics);        for (String interest : interestTopics) {
             if (topics.contains(interest)) {
-                return Math.random() < 0.5;
+                return true;
             }
         }
-        return false;
+        return message.contains("最近") || message.contains("大家") || message.contains("你们")
+                || message.contains("推荐") || message.contains("好看") || message.contains("好玩");
     }
 
     // ===== 私有辅助方法 =====

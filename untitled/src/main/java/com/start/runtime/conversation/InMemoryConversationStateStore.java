@@ -15,6 +15,7 @@ public class InMemoryConversationStateStore implements ConversationStateStore {
     private final Map<String, Deque<BaiLianService.ContextEvent>> groupContexts;
     private final Map<String, BaiLianService.PendingAwait> pendingAwaits;
     private final Map<String, Deque<Long>> groupReactionHistory;
+    private final Map<String, Long> negativeCooldownUntil = new ConcurrentHashMap<>();
     private static final int MAX_REACTIONS = 10;
     private static final long REACTION_WINDOW_MS = 300_000;
 
@@ -91,5 +92,23 @@ public class InMemoryConversationStateStore implements ConversationStateStore {
         synchronized (history) {
             history.addLast(System.currentTimeMillis());
         }
+    }
+
+    @Override
+    public boolean isNegativeCooldown(String groupId) {
+        Long until = negativeCooldownUntil.get(groupId);
+        if (until == null) return false;
+        if (until > System.currentTimeMillis()) return true;
+        negativeCooldownUntil.remove(groupId, until);
+        return false;
+    }
+
+    @Override
+    public void setNegativeCooldown(String groupId, long durationMs) {
+        if (durationMs <= 0) {
+            negativeCooldownUntil.remove(groupId);
+            return;
+        }
+        negativeCooldownUntil.put(groupId, System.currentTimeMillis() + durationMs);
     }
 }

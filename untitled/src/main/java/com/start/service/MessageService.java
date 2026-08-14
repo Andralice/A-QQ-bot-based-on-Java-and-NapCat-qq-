@@ -37,10 +37,22 @@ public class MessageService {
      */
     public void saveUserMessage(String sessionId, String userId, String groupId,
                                 String content, boolean isPrivate) {
+        saveInboundUserMessage(sessionId, userId, groupId, content, content, isPrivate, null);
+    }
+
+    /**
+     * 持久化一条 OneBot 入站消息。content 是检索使用的规范文本，rawContent 保留协议原文；
+     * sourceEventKey 使重放事件幂等，避免 AI 提交阶段再产生第二条用户记录。
+     */
+    public void saveInboundUserMessage(String sessionId, String userId, String groupId,
+                                       String rawContent, String content, boolean isPrivate,
+                                       String sourceEventKey) {
         Map<String, Object> data = new HashMap<>();
         data.put("sessionId", sessionId);
         data.put("userId", userId);
-        data.put("content", content);
+        data.put("content", content == null ? "" : content);
+        if (rawContent != null && !rawContent.equals(content)) data.put("rawContent", rawContent);
+        if (sourceEventKey != null && !sourceEventKey.isBlank()) data.put("sourceEventKey", sourceEventKey);
         data.put("isRobotReply", false);
         data.put("isPrivate", isPrivate);
 
@@ -48,15 +60,28 @@ public class MessageService {
             data.put("groupId", groupId);
 
             // 提取话题
-            String topics = extractTopics(content);
+            String topics = extractTopics(content == null ? "" : content);
             if (!topics.isEmpty()) {
                 data.put("topics", topics);
             }
         }
 
         userRepo.createOrUpdateUser(userId, "");
-        messageRepo.saveMessage(data);
-        userRepo.incrementMessageCount(userId);
+        var insertResult = messageRepo.insertInboundMessageIfAbsent(data);
+        if (insertResult.isSuccess() && insertResult.getData() != null && insertResult.getData() == 1) {
+            userRepo.incrementMessageCount(userId);
+        }
+    }
+
+    public void attachImageData(String sourceEventKey, String imageData) {
+        messageRepo.updateImageDataBySourceEventKey(sourceEventKey, imageData);
+    }
+
+    /** Returns null for events without a stable OneBot message id, preserving legacy compatibility. */
+    public static String sourceEventKey(String messageType, String groupId, String userId, String messageId) {
+        if (messageId == null || messageId.isBlank()) return null;
+        String scope = "group".equals(messageType) ? "group:" + groupId : "private";
+        return scope + ":" + userId + ":" + messageId;
     }
 
     /**

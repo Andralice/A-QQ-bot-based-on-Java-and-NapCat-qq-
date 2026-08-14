@@ -53,6 +53,13 @@ public class BotConfig {
     private static int ttsTimeoutMs;
     private static int ttsMaxRetries;
 
+    /** 火山引擎 - 豆包语音合成 2.0 TTS 配置。enabled=true 时优先使用，失败 fallback 到 text-to-speech.cn。 */
+    private static String volcTtsAccessToken;
+    private static String volcTtsVoiceType;
+    private static String volcTtsResourceId;
+    private static boolean volcTtsEnabled;
+    private static int volcTtsTimeoutMs;
+
     private static String merchantApiBaseUrl;
     private static String merchantApiKey;
     private static boolean merchantNotifyEnabled;
@@ -128,6 +135,12 @@ public class BotConfig {
             ttsOutputDir = resolveOrEmpty(props.getProperty("tts.output-dir", "/opt/qq-bot/tts/output"));
             ttsMaxRetries = parseInt(resolveOrEmpty(props.getProperty("tts.max-retries", "2")), 2);
 
+            volcTtsEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("volc.tts.enabled", "false")));
+            volcTtsAccessToken = resolveOrEmpty(props.getProperty("volc.tts.access-token", ""));
+            volcTtsVoiceType = resolveOrEmpty(props.getProperty("volc.tts.voice-type", ""));
+            volcTtsResourceId = resolveOrEmpty(props.getProperty("volc.tts.resource-id", "seed-icl-2.0"));
+            volcTtsTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("volc.tts.timeout-ms", "15000")), 15000);
+
             merchantApiBaseUrl = resolveOrEmpty(props.getProperty("merchant.api.base-url", "https://wegame.shallow.ink"));
             merchantApiKey = resolveOrEmpty(props.getProperty("merchant.api.key", ""));
             merchantNotifyEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("merchant.notify.enabled", "true")));
@@ -161,6 +174,12 @@ public class BotConfig {
                 logger.info("✅ 所有私聊消息将被允许");
             }
             logger.info("🔊 TTS 服务: {} (voice={}, format={})", ttsBaseUrl, ttsDefaultVoice, ttsAudioFormat);
+            if (volcTtsEnabled) {
+                logger.info("🔥 豆包语音合成 2.0 TTS: enabled, voiceType={}, resourceId={}, timeout={}ms",
+                        volcTtsVoiceType, volcTtsResourceId, volcTtsTimeoutMs);
+            } else {
+                logger.info("🔥 豆包语音合成 2.0 TTS: disabled（fallback 到 text-to-speech.cn）");
+            }
         } catch (Exception e) {
             logger.error("❌ 加载配置失败", e);
             throw new RuntimeException("配置加载失败，请检查 application.properties", e);
@@ -377,6 +396,12 @@ public class BotConfig {
     public static int getTtsMaxRetries() {
         return ttsMaxRetries;
     }
+
+    public static boolean isVolcTtsEnabled() { return volcTtsEnabled; }
+    public static String getVolcTtsAccessToken() { return volcTtsAccessToken; }
+    public static String getVolcTtsVoiceType() { return volcTtsVoiceType; }
+    public static String getVolcTtsResourceId() { return volcTtsResourceId; }
+    public static int getVolcTtsTimeoutMs() { return volcTtsTimeoutMs; }
 
     public static int getHttpConnectTimeoutMs() {
         return httpConnectTimeoutMs;

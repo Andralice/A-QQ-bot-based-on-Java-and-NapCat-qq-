@@ -81,6 +81,7 @@ public class WeatherTool implements Tool {
                 String encoded = URLEncoder.encode(name, StandardCharsets.UTF_8);
                 String geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name=" + encoded + "&count=1&language=zh";
                 HttpRequest req = HttpRequest.newBuilder().uri(URI.create(geoUrl))
+                        .header("User-Agent", "CandyBearBot/1.0 (TQQ-bot weather query)")
                         .timeout(java.time.Duration.ofSeconds(10)).build();
                 HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
                 if (resp.statusCode() == 200) {
@@ -89,6 +90,7 @@ public class WeatherTool implements Tool {
                     // 不带 language=zh 重试
                     geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name=" + encoded + "&count=1";
                     req = HttpRequest.newBuilder().uri(URI.create(geoUrl))
+                            .header("User-Agent", "CandyBearBot/1.0 (TQQ-bot weather query)")
                             .timeout(java.time.Duration.ofSeconds(10)).build();
                     resp = http.send(req, HttpResponse.BodyHandlers.ofString());
                     geo = mapper.readTree(resp.body());
@@ -112,6 +114,7 @@ public class WeatherTool implements Tool {
                     "&timezone=auto&forecast_days=" + days, lat, lon);
 
             HttpRequest wReq = HttpRequest.newBuilder().uri(URI.create(wUrl))
+                    .header("User-Agent", "CandyBearBot/1.0 (TQQ-bot weather query)")
                     .timeout(java.time.Duration.ofSeconds(10)).build();
             HttpResponse<String> wResp = http.send(wReq, HttpResponse.BodyHandlers.ofString());
             if (wResp.statusCode() != 200) return "天气服务暂不可用。";

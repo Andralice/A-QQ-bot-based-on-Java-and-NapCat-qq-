@@ -72,6 +72,11 @@ public class BotMoodService {
         groupMessageStreak.merge(groupId, 1, Integer::sum);
     }
 
+    /** Groups with observed activity, used by the low-frequency cold-room check. */
+    public java.util.Set<String> getTrackedGroupIds() {
+        return java.util.Set.copyOf(groupLastMessageTime.keySet());
+    }
+
     /** 检查群是否冷场 */
     public boolean isGroupCold(String groupId) {
         Long last = groupLastMessageTime.get(groupId);
@@ -86,8 +91,13 @@ public class BotMoodService {
         Long lastThrow = groupLastTopicThrowTime.getOrDefault(groupId, 0L);
         if (now - lastThrow < TOPIC_COOLDOWN_SECONDS * 1000) return false;
         if (getMood(groupId) < 40) return false;
+        return true;
+    }
+
+    /** Call only after the quiet-group opener was actually delivered. */
+    public void recordTopicThrown(String groupId) {
+        long now = System.currentTimeMillis();
         groupLastTopicThrowTime.put(groupId, now);
-        // 同步写入 DB
         try {
             GroupMood gm = loadFromDb(groupId);
             if (gm != null) {
@@ -97,7 +107,6 @@ public class BotMoodService {
         } catch (Exception e) {
             logger.warn("写入抛话题时间失败: {}", e.getMessage());
         }
-        return true;
     }
 
     /** 生成话题抛出提示词 */
@@ -110,6 +119,18 @@ public class BotMoodService {
             "分享一个有趣的小知识或冷知识。",
         };
         return topics[(int) (Math.random() * topics.length)];
+    }
+
+    /** A ready-to-send, low-pressure opener for a quiet group. */
+    public String getColdGroupOpening(String groupId) {
+        groupMessageStreak.put(groupId, 0);
+        String[] openings = {
+                "突然好奇，大家今天有没有遇到一件开心的小事？",
+                "最近大家循环最多的是哪首歌呀？",
+                "如果今晚能立刻出门，你们最想去哪里？",
+                "来个轻松的：最近有什么想安利给大家的吗？"
+        };
+        return openings[(int) (Math.random() * openings.length)];
     }
 
     // ===== 查询 =====

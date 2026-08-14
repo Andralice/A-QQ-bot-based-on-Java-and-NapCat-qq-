@@ -36,10 +36,14 @@ public class ProfessionPKHandler implements MessageHandler {
         String text = extractText(message);
         if (text == null) return false;
         String t = text.trim();
-        // 匹配 "@xxx PK" 或 "PK @xxx"
-        return hasAtAndKeyword(t, "pk") || hasAtAndKeyword(t, "PK") || hasAtAndKeyword(t, "Pk");
+        // 严格匹配：pk 必须是独立命令（"@xxx pk" 或 "pk @xxx"），不是消息里随便出现
+        // bug 之前："@糖果熊 我们看看pk记录" 会被误判成 PK，因为 @bot + 含"pk"
+        // 修复：pk 必须紧贴 [CQ:at,qq=xxx]（前后用 \b 隔离）
+        return t.matches("(?i).*\\[CQ:at,qq=\\d+\\]\\s+pk\\b.*")
+                || t.matches("(?i).*\\bpk\\s+\\[CQ:at,qq=\\d+\\].*");
     }
 
+    @Deprecated  // 之前用 contains 太松，误判率高
     private boolean hasAtAndKeyword(String text, String kw) {
         return text.contains("[CQ:at,") && text.toLowerCase().contains(kw.toLowerCase());
     }

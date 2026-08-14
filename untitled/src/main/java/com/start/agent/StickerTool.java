@@ -1,28 +1,35 @@
 package com.start.agent;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.Main;
+import com.start.service.StickerIngestService;
+import com.start.service.StickerIngestService.StickerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.InputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 表情包工具 —— AI 在聊天中发送表情包/梗图/QQ 表情
+ * 表情包发送工具 —— AI 在聊天中发送表情包/梗图/QQ 表情。
+ *
+ * <p>数据源统一由 {@link StickerIngestService} 管理：自动入库的表情包 + 管理员私聊导入的 legacy
+ * 表情包关键词映射（file 字段为空时回退到 QQ face）。
  */
 public class StickerTool implements Tool {
 
     private static final Logger logger = LoggerFactory.getLogger(StickerTool.class);
 
     private final Main bot;
-    private final List<StickerEntry> stickers;
     private final Map<String, Long> lastSendTime = new HashMap<>();
     private static final long COOLDOWN_MS = 30_000;
 
-    // QQ 内置表情 face id 映射（文件名空时的回退）
+    // QQ 内置表情 face id 映射（file 字段空时的回退）
     private static final Map<String, Integer> FACE_FALLBACK = Map.ofEntries(
             Map.entry("开心", 14), Map.entry("笑", 14), Map.entry("哈哈", 14),
             Map.entry("无语", 11), Map.entry("尴尬", 11),
@@ -37,8 +44,12 @@ public class StickerTool implements Tool {
 
     public StickerTool(Main bot) {
         this.bot = bot;
-        this.stickers = loadMetadata();
-        logger.info("加载了 {} 条表情包元数据", stickers.size());
+        try {
+            int count = StickerIngestService.getInstance().getAllStickers().size();
+            logger.info("StickerTool 初始化：当前 sticker 库 {} 条", count);
+        } catch (Exception e) {
+            logger.warn("StickerIngestService 未初始化，sticker 功能将只使用 QQ face: {}", e.getMessage());
+        }
     }
 
     @Override
@@ -46,52 +57,63 @@ public class StickerTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "在群里发一张表情包/QQ表情/梗图。" +
-                "当聊天氛围适合发图、用户说『发个表情包』『来张图』、或者你想用图表达情绪时调用。" +
-                "keywords 参数描述你想要的情绪类型（如 开心/无语/安慰/加油 等），不传则随机发。";
+        return "用表情包/QQ表情/梗图回应群友/私聊好友，是你日常聊天的一部分。\n" +
+                "触发场景：\n" +
+                "- 对方表达明显情绪（开心/难过/无语/愤怒/惊讶等）→ 发匹配情绪的图\n" +
+                "- 对方发了图/梗 → 跟图\n" +
+                "- 群内冷场 30s+ → 主动发图活跃气氛\n" +
+                "- 私聊时对方情绪到位 → 也可以发图\n" +
+                "- 用户直接要图（『发个表情包』『来张图』）→ 立刻发\n" +
+                "- 别人感谢/夸你/示好 → 可以发比心/害羞\n" +
+                "keywords 选情绪标签（开心/无语/哭/加油/得意/嘲讽/震惊/比心 等），不传则随机。\n" +
+                "参数：group_id（群时填，私聊不填） OR user_id（私聊时填，群不填）—— 二选一必填。\n" +
+                "冷却 30 秒（私聊 30 秒/用户，群 30 秒/群）防刷屏。\n" +
+                "别等用户要才发 —— 看到情绪就发，是日常社交的一部分。";
     }
 
     @Override
     public Map<String, Object> getParameters() {
         return Map.of("type", "object",
                 "properties", Map.of(
-                        "group_id", Map.of("type", "string", "description", "目标群号"),
+                        "group_id", Map.of("type", "string", "description", "目标群号（群聊必填，私聊不填）"),
+                        "user_id", Map.of("type", "string", "description", "目标用户 QQ（私聊必填，群聊不填）"),
                         "keywords", Map.of("type", "string", "description", "表情包类型，如：开心、无语、哭、安慰、加油、赞等。不传则随机")
                 ),
-                "required", List.of("group_id"));
+                "required", List.of());  // 二选一必填在 execute() 里校验
     }
 
     @Override
     public String execute(Map<String, Object> args) {
         String groupId = (String) args.get("group_id");
-        if (groupId == null || groupId.isBlank()) return "缺少 group_id";
+        String userId = (String) args.get("user_id");
+        boolean isGroup = groupId != null && !groupId.isBlank();
+        boolean isPrivate = userId != null && !userId.isBlank();
+        if (!isGroup && !isPrivate) return "缺少 group_id 或 user_id（必填其一）";
+
+        String cooldownKey = isGroup ? "g:" + groupId : "p:" + userId;
 
         // 冷却检查
         long now = System.currentTimeMillis();
-        Long last = lastSendTime.get(groupId);
+        Long last = lastSendTime.get(cooldownKey);
         if (last != null && now - last < COOLDOWN_MS) {
             return "表情包冷却中，稍后再发";
         }
-        lastSendTime.put(groupId, now);
+        lastSendTime.put(cooldownKey, now);
 
         String keywords = (String) args.get("keywords");
 
         try {
-            StickerEntry selected = selectSticker(keywords);
+            StickerRecord selected = selectSticker(keywords);
             if (selected == null) return "没找到合适的表情包";
 
             String cqCode;
             if (selected.file != null && !selected.file.isBlank()) {
-                // 从 classpath 加载图片
-                InputStream is = getClass().getClassLoader()
-                        .getResourceAsStream("stickers/" + selected.file);
-                if (is != null) {
-                    byte[] bytes = is.readAllBytes();
-                    is.close();
+                // 从 StickerIngestService 读文件
+                byte[] bytes = StickerIngestService.getInstance().readStickerBytes(selected);
+                if (bytes != null && bytes.length > 0) {
                     String b64 = Base64.getEncoder().encodeToString(bytes);
                     cqCode = "[CQ:image,file=base64://" + b64 + "]";
                 } else {
-                    // 文件不存在，回退到 QQ face
                     cqCode = faceFallback(selected);
                 }
             } else {
@@ -102,7 +124,11 @@ public class StickerTool implements Tool {
                 return "表情包发送失败";
             }
 
-            bot.sendGroupReply(Long.parseLong(groupId), cqCode);
+            if (isGroup) {
+                bot.sendGroupReply(Long.parseLong(groupId), cqCode);
+            } else {
+                bot.sendPrivateReply(Long.parseLong(userId), cqCode);
+            }
             return "已发送表情包: " + String.join(",", selected.keywords);
         } catch (Exception e) {
             logger.warn("发送表情包失败", e);
@@ -110,65 +136,73 @@ public class StickerTool implements Tool {
         }
     }
 
-    private StickerEntry selectSticker(String keywords) {
-        if (stickers.isEmpty()) return null;
+    private StickerRecord selectSticker(String keywords) {
+        List<StickerRecord> all;
+        try {
+            all = StickerIngestService.getInstance().getAllStickers();
+        } catch (Exception e) {
+            return null;
+        }
+        // 只选有真图的（file 非空）。legacy face fallback 条目不进选池。
+        List<StickerRecord> realStickers = new ArrayList<>();
+        for (StickerRecord r : all) {
+            if (r.file != null && !r.file.isBlank()) {
+                realStickers.add(r);
+            }
+        }
+        if (realStickers.isEmpty()) {
+            // 没真图时 fallback 到 face（保留功能）
+            return pickFaceFallback(all);
+        }
         if (keywords == null || keywords.isBlank()) {
-            return stickers.get(ThreadLocalRandom.current().nextInt(stickers.size()));
+            return realStickers.get(ThreadLocalRandom.current().nextInt(realStickers.size()));
         }
         // 关键词匹配打分
-        List<StickerEntry> scored = new ArrayList<>(stickers);
+        List<StickerRecord> scored = new ArrayList<>(realStickers);
         scored.sort((a, b) -> {
             int sa = matchScore(b, keywords) - matchScore(a, keywords);
             if (sa != 0) return sa;
             return ThreadLocalRandom.current().nextInt(3) - 1;
         });
-        // 取 top 3 里随机一个
         int limit = Math.min(3, scored.size());
         return scored.get(ThreadLocalRandom.current().nextInt(limit));
     }
 
-    private int matchScore(StickerEntry entry, String input) {
+    /** 仅在没真图时兜底用：返回一条 legacy（file=""），execute() 走 faceFallback 路径。 */
+    private StickerRecord pickFaceFallback(List<StickerRecord> all) {
+        for (StickerRecord r : all) {
+            if (r.file == null || r.file.isBlank()) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    private int matchScore(StickerRecord entry, String input) {
         int score = 0;
-        String lower = input.toLowerCase();
+        String lower = input.toLowerCase(Locale.ROOT);
+        // 优先匹配管理员修正后的 keywords，回退到 LLM 出的 auto_keywords
         for (String kw : entry.keywords) {
             if (lower.contains(kw)) score += 10;
-            if (kw.contains(lower)) score += 5;
+            if (kw.toLowerCase(Locale.ROOT).contains(lower)) score += 5;
+        }
+        for (String kw : entry.autoKeywords) {
+            if (lower.contains(kw)) score += 4;
+            if (kw.toLowerCase(Locale.ROOT).contains(lower)) score += 2;
         }
         return score;
     }
 
-    private String faceFallback(StickerEntry entry) {
-        for (String kw : entry.keywords) {
+    private String faceFallback(StickerRecord entry) {
+        // 优先用 keywords（管理员修正的），回退到 autoKeywords
+        List<String> candidates = !entry.keywords.isEmpty() ? entry.keywords : entry.autoKeywords;
+        for (String kw : candidates) {
             for (Map.Entry<String, Integer> fb : FACE_FALLBACK.entrySet()) {
                 if (kw.contains(fb.getKey()) || fb.getKey().contains(kw)) {
                     return "[CQ:face,id=" + fb.getValue() + "]";
                 }
             }
         }
-        // 无匹配回退 → 随机发个默认表情
         return "[CQ:face,id=" + (14 + ThreadLocalRandom.current().nextInt(5)) + "]";
-    }
-
-    // ---- 元数据加载 ----
-
-    private List<StickerEntry> loadMetadata() {
-        try (InputStream is = getClass().getClassLoader().getResourceAsStream("stickers/stickers.json")) {
-            if (is == null) {
-                logger.warn("stickers.json 未找到，表情包功能将只使用 QQ 内置表情");
-                return Collections.emptyList();
-            }
-            ObjectMapper mapper = new ObjectMapper();
-            return mapper.readValue(is, new TypeReference<List<StickerEntry>>() {});
-        } catch (Exception e) {
-            logger.warn("加载 stickers.json 失败", e);
-            return Collections.emptyList();
-        }
-    }
-
-    // ---- 内部类 ----
-
-    public static class StickerEntry {
-        public String file;
-        public List<String> keywords;
     }
 }

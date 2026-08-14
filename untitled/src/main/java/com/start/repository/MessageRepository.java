@@ -16,13 +16,19 @@ public class MessageRepository extends BaseRepository {
      */
     public DatabaseResult<Long> saveMessage(Map<String, Object> data) {
         return safeExecute(() -> {
-            String sql = "INSERT INTO messages (session_id, user_id, content, is_robot_reply, " +
-                    "is_private, group_id, reply_to_id, topics, image_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            String sql = "INSERT INTO messages (session_id, user_id, content, raw_content, source_event_key, " +
+                    "is_robot_reply, is_private, group_id, reply_to_id, topics, image_data) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                    "ON DUPLICATE KEY UPDATE session_id = VALUES(session_id), content = VALUES(content), " +
+                    "raw_content = COALESCE(VALUES(raw_content), raw_content), topics = VALUES(topics), " +
+                    "image_data = COALESCE(VALUES(image_data), image_data)";
 
             // 提取参数，处理null值
             String sessionId = getStringValue(data, "sessionId", "");
             String userId = getStringValue(data, "userId", "");
             String content = getStringValue(data, "content", "");
+            String rawContent = getStringValue(data, "rawContent", null);
+            String sourceEventKey = getStringValue(data, "sourceEventKey", null);
             boolean isRobotReply = getBooleanValue(data, "isRobotReply", false);
             boolean isPrivate = getBooleanValue(data, "isPrivate", false);
             String groupId = getStringValue(data, "groupId", null);
@@ -31,9 +37,43 @@ public class MessageRepository extends BaseRepository {
             String imageData = getStringValue(data, "imageData", null);
 
             return executeInsert(sql,
-                    sessionId, userId, content, isRobotReply, isPrivate, groupId, replyToId, topics, imageData
+                    sessionId, userId, content, rawContent, sourceEventKey, isRobotReply, isPrivate,
+                    groupId, replyToId, topics, imageData
             ).getData();
         });
+    }
+
+    /**
+     * Inserts a source-keyed OneBot inbound message exactly once. A redelivered
+     * event must not create another row or be counted as another user message.
+     */
+    public DatabaseResult<Integer> insertInboundMessageIfAbsent(Map<String, Object> data) {
+        String sql = "INSERT INTO messages (session_id, user_id, content, raw_content, source_event_key, " +
+                "is_robot_reply, is_private, group_id, reply_to_id, topics, image_data) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                "ON DUPLICATE KEY UPDATE source_event_key = VALUES(source_event_key)";
+
+        return executeUpdate(sql,
+                getStringValue(data, "sessionId", ""),
+                getStringValue(data, "userId", ""),
+                getStringValue(data, "content", ""),
+                getStringValue(data, "rawContent", null),
+                getStringValue(data, "sourceEventKey", null),
+                false,
+                getBooleanValue(data, "isPrivate", false),
+                getStringValue(data, "groupId", null),
+                getLongValue(data, "replyToId", null),
+                getStringValue(data, "topics", null),
+                getStringValue(data, "imageData", null));
+    }
+
+    /** 为已入库的 OneBot 原始消息补充异步得到的图片描述。 */
+    public DatabaseResult<Integer> updateImageDataBySourceEventKey(String sourceEventKey, String imageData) {
+        if (sourceEventKey == null || sourceEventKey.isBlank() || imageData == null || imageData.isBlank()) {
+            return DatabaseResult.success(0);
+        }
+        return executeUpdate("UPDATE messages SET image_data = ? WHERE source_event_key = ?",
+                imageData, sourceEventKey);
     }
 
     /**

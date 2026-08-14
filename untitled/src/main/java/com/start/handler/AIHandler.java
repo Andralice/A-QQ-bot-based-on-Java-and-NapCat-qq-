@@ -18,6 +18,10 @@ import com.start.service.ConversationState;
 import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
+import com.start.service.ProactiveFeedbackDetector;
+import com.start.service.ProactiveInterjectionPolicy;
+import com.start.service.StickerIngestService;
+import com.start.service.ToolAuthorizationService;
 import com.start.memory.MemoryInterpreter;
 import com.start.memory.MemoryRecall;
 import com.start.model.DecisionContext;
@@ -47,6 +51,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import static com.start.util.MessageUtil.extractAts;
@@ -72,6 +82,20 @@ public class AIHandler implements MessageHandler {
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> lastProactiveReplyTime = new ConcurrentHashMap<>();
+    private static final long PROACTIVE_SETTLE_MS = 1_500;
+    private static final long NEGATIVE_FEEDBACK_WINDOW_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final long NEGATIVE_FEEDBACK_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(10);
+    private final ProactiveInterjectionPolicy proactivePolicy = new ProactiveInterjectionPolicy();
+    private final ConcurrentHashMap<String, Long> pendingProactiveIds = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ScheduledFuture<?>> pendingProactiveTasks = new ConcurrentHashMap<>();
+    private final AtomicLong proactiveSequence = new AtomicLong();
+    private final AtomicBoolean coldGroupMonitorStarted = new AtomicBoolean();
+    private final ScheduledExecutorService proactiveScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "CandyBear-Proactive-Scheduler");
+        t.setDaemon(true);
+        return t;
+    });
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
 
     /** 记忆查询意图关键词：rate_limited 时如果用户明显在问"你还记得..."，不沉默，先查记忆给短回复 */
@@ -133,6 +157,23 @@ public class AIHandler implements MessageHandler {
         // 提取图片信息（只在 WebSocket 线程提取 URL，下载在 executor 内完成）
         List<Map<String, String>> imageInfos = MessageUtil.extractImages(msg.path("message"));
 
+        // 消息接收阶段立即 fire ImageReceived：让 StickerHarvesterListener 异步入库，
+        // 不依赖 conversation 是否被唤醒/速率限制/无关键 prompt。
+        if (!imageInfos.isEmpty()) {
+            String gidForSticker = "group".equals(messageType) ? String.valueOf(groupId) : "private";
+            String uidForSticker = String.valueOf(userId);
+            for (Map<String, String> img : imageInfos) {
+                String url = img.get("url");
+                if (url != null && !url.isEmpty()) {
+                    try {
+                        runtime.fire(new RuntimeEvent.ImageReceived(gidForSticker, uidForSticker, url));
+                    } catch (Exception e) {
+                        logger.debug("fire ImageReceived 失败: {}", e.getMessage());
+                    }
+                }
+            }
+        }
+
         // 提取文件信息 → 存入缓存，由副 AI 处理，主 AI 通过 query_file 工具主动获取
         List<Map<String, String>> fileInfos = MessageUtil.extractFiles(msg.path("message"));
         if (!fileInfos.isEmpty()) {
@@ -169,6 +210,16 @@ public class AIHandler implements MessageHandler {
 
         String gid = String.valueOf(groupId);
         String uid = String.valueOf(userId);
+
+        // A new group message means an earlier interjection candidate is no longer timely.
+        cancelPendingProactive(gid);
+
+        if (isNegativeFeedbackForRecentProactive(gid, plainText, ats)) {
+            interpreter.setNegativeCooldown(gid, NEGATIVE_FEEDBACK_COOLDOWN_MS);
+            if (moodService != null) moodService.onNegativeInteraction(gid);
+            logDecision(gid, uid, "PROBABILISTIC", "SILENT", "negative_feedback", 0, 0, 0);
+            return;
+        }
 
         // 群聊情绪追踪
         if (moodService != null) {
@@ -236,6 +287,20 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
+        if (result.event() == ConversationEvent.PROBABILISTIC) {
+            ConversationMetrics.Snapshot snapshot = aiService.getConversationMetrics() != null
+                    ? aiService.getConversationMetrics().getSnapshot(gid)
+                    : ConversationMetrics.Snapshot.EMPTY;
+            ProactiveInterjectionPolicy.Decision decision = proactivePolicy.assess(
+                    plainText, snapshot, interpreter.isNegativeCooldown(gid), random.nextDouble());
+            if (!decision.shouldSchedule()) {
+                logDecision(gid, uid, result.event().name(), "SILENT", decision.reason(), 0, 0, 0);
+                return;
+            }
+            scheduleProactiveReply(bot, groupId, gid, uid, nickname, ats, result);
+            return;
+        }
+
         long now = System.currentTimeMillis();
 
         // 速率限制（PASSIVE_TRIGGER 可以绕过）
@@ -265,35 +330,36 @@ public class AIHandler implements MessageHandler {
             // 注意：只更新 groupReplyTime 不更新 userReactionTime，避免被刷屏
             String shortReply = tryFastMemoryReply(uid, gid, plainText);
             if (shortReply != null) {
-                lastGroupReplyTime.put(gid, now);
                 // 第二阶段 2.2：传 sessionId 让 AI 回复与用户消息同 session
                 String fastSessionId = com.start.service.SessionId.groupConversation(gid, uid);
-                sendSplitGroupReplies(bot, groupId, shortReply, fastSessionId);
+                boolean delivered = sendSplitGroupReplies(bot, groupId, shortReply, fastSessionId);
+                if (delivered) {
+                    recordDeliveredReaction(gid, uid);
+                }
                 // 留痕：让后续 Interpreter 能识别到这条 ai_reply
                 // （否则 fast path 回复后的 3 分钟内，AI_COMMENTED 事件识别不到）
-                logDecision(gid, uid, result.event().name(), "REPLY", "memory_recall_fast", 0, 0, 0);
+                logDecision(gid, uid, result.event().name(), delivered ? "REPLY" : "SILENT",
+                        delivered ? "memory_recall_fast" : "send_failed", 0, 0, 0);
                 return;
             }
             logDecision(gid, uid, result.event().name(), "SILENT", "rate_limited", 0, 0, 0);
             return;
         }
 
-        lastReactionTime.put(userKey, now);
-
         if (result.isDirect()) {
             // 被动触发直接回复，不走 AI
-            lastGroupReplyTime.put(gid, now);
-            aiService.recordReaction(gid);
-            sendSplitGroupReplies(bot, groupId, result.directReply(),
+            boolean delivered = sendSplitGroupReplies(bot, groupId, result.directReply(),
                     com.start.service.SessionId.groupConversation(gid, uid));
+            if (delivered) {
+                recordDeliveredReaction(gid, uid);
+            }
             conversationManager.remove(gid, uid);
-            logDecision(gid, uid, result.event().name(), "REPLY", "direct", 0, 0, now - System.currentTimeMillis());
+            logDecision(gid, uid, result.event().name(), delivered ? "REPLY" : "SILENT",
+                    delivered ? "direct" : "send_failed", 0, 0, now - System.currentTimeMillis());
             return;
         }
 
         // 需要 AI 生成：只有 PROBABILISTIC 允许沉默
-        lastGroupReplyTime.put(gid, now);
-        aiService.recordReaction(gid);
         boolean allowSilence = result.event().allowsSilence();
         long startMs = System.currentTimeMillis();
         runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs, result.event());
@@ -306,6 +372,108 @@ public class AIHandler implements MessageHandler {
         DECISION_LOGGER.info(trace.toLogLine());
         WebDashboardListener.recordDecision(gid, uid, eventType, decision, reason,
                 toolCalls, tokensUsed, latencyMs);
+    }
+
+    private void scheduleProactiveReply(Main bot, long groupId, String gid, String uid, String nickname,
+                                        List<Long> ats, ConversationInterpreter.InterpretResult result) {
+        long candidateId = proactiveSequence.incrementAndGet();
+        pendingProactiveIds.put(gid, candidateId);
+        ScheduledFuture<?> previous = pendingProactiveTasks.remove(gid);
+        if (previous != null) previous.cancel(false);
+
+        ScheduledFuture<?> task = proactiveScheduler.schedule(() -> groupExecutor.execute(gid, () -> {
+            if (!pendingProactiveIds.remove(gid, candidateId)) return;
+            pendingProactiveTasks.remove(gid);
+
+            ConversationMetrics.Snapshot snapshot = aiService.getConversationMetrics() != null
+                    ? aiService.getConversationMetrics().getSnapshot(gid)
+                    : ConversationMetrics.Snapshot.EMPTY;
+            if (!proactivePolicy.remainsAppropriate(snapshot, interpreter.isNegativeCooldown(gid))) {
+                logDecision(gid, uid, result.event().name(), "SILENT", "group_changed_during_settle", 0, 0, 0);
+                return;
+            }
+            if (conversationManager.get(gid, uid) == null) {
+                logDecision(gid, uid, result.event().name(), "SILENT", "conversation_expired", 0, 0, 0);
+                return;
+            }
+            if (!canStartReaction(gid, uid)) {
+                logDecision(gid, uid, result.event().name(), "SILENT", "rate_limited", 0, 0, 0);
+                return;
+            }
+            runGroupConversation(bot, groupId, gid, uid, nickname, ats, true,
+                    System.currentTimeMillis(), result.event());
+        }), PROACTIVE_SETTLE_MS, TimeUnit.MILLISECONDS);
+        pendingProactiveTasks.put(gid, task);
+    }
+
+    private void cancelPendingProactive(String gid) {
+        pendingProactiveIds.remove(gid);
+        ScheduledFuture<?> task = pendingProactiveTasks.remove(gid);
+        if (task != null) task.cancel(false);
+    }
+
+    private boolean canStartReaction(String gid, String uid) {
+        if (!aiService.canReact(gid)) return false;
+        long now = System.currentTimeMillis();
+        Long lastGroupReply = lastGroupReplyTime.get(gid);
+        if (lastGroupReply != null && now - lastGroupReply < config.groupReplyCooldown().toMillis()) return false;
+        Long lastUserReply = lastReactionTime.get(gid + "_" + uid);
+        return lastUserReply == null || now - lastUserReply >= config.userReplyCooldown().toMillis();
+    }
+
+    private void recordDeliveredReaction(String gid, String uid) {
+        long now = System.currentTimeMillis();
+        lastGroupReplyTime.put(gid, now);
+        lastReactionTime.put(gid + "_" + uid, now);
+        aiService.recordReaction(gid);
+    }
+
+    private void recordProactiveDelivery(String gid) {
+        lastProactiveReplyTime.put(gid, System.currentTimeMillis());
+    }
+
+    private boolean isNegativeFeedbackForRecentProactive(String gid, String message, List<Long> ats) {
+        Long proactiveAt = lastProactiveReplyTime.get(gid);
+        if (proactiveAt == null) return false;
+        long elapsed = System.currentTimeMillis() - proactiveAt;
+        if (elapsed > NEGATIVE_FEEDBACK_WINDOW_MS) {
+            lastProactiveReplyTime.remove(gid, proactiveAt);
+            return false;
+        }
+        return ProactiveFeedbackDetector.isDirectedNegativeFeedback(message, ats, BotConfig.getBotQq());
+    }
+
+    /** Starts a daemon check for quiet groups after all services have been initialized. */
+    public void startProactiveMonitor(Main bot) {
+        if (moodService == null || !coldGroupMonitorStarted.compareAndSet(false, true)) return;
+        proactiveScheduler.scheduleWithFixedDelay(() -> checkColdGroups(bot), 1, 1, TimeUnit.MINUTES);
+    }
+
+    private void checkColdGroups(Main bot) {
+        for (String gid : moodService.getTrackedGroupIds()) {
+            try {
+                if (!moodService.shouldThrowTopic(gid)
+                        || interpreter.isNegativeCooldown(gid)
+                        || !canStartReaction(gid, "candybear")) continue;
+                long groupId = Long.parseLong(gid);
+                // [2026-08-14] 暂时关掉冷场主动插话的开场白——用户反馈太突兀（"问大家想听什么歌"这种）。
+                //   getColdGroupOpening() 方法保留不动，以后想换内容或重新开启直接恢复。
+                // String opening = moodService.getColdGroupOpening(gid);
+                // boolean delivered = bot.sendGroupReply(groupId, opening,
+                //         com.start.service.SessionId.groupBotReply(gid));
+                // if (!delivered) continue;
+                // moodService.recordTopicThrown(gid);
+                // recordDeliveredReaction(gid, "candybear");
+                // recordProactiveDelivery(gid);
+                // if (aiService.getConversationMetrics() != null) {
+                //     aiService.getConversationMetrics().recordAiReply(gid);
+                // }
+                // moodService.onBotSpeak(gid);
+                // logDecision(gid, "candybear", "COLD_START", "REPLY", "quiet_group", 0, 0, 0);
+            } catch (Exception e) {
+                logger.debug("Cold-group prompt skipped for {}: {}", gid, e.getMessage());
+            }
+        }
     }
 
     private static final HttpClient auditHttpClient = HttpClient.newBuilder()
@@ -339,8 +507,21 @@ public class AIHandler implements MessageHandler {
                 imageInfoMaps.add(m);
             }
             List<String> imageDataUris = downloadImages(imageInfoMaps);
-            String imageDesc = aiService.describeImages(imageDataUris);
+            String imageDesc = describeImagesWithCache(imageInfoMaps, imageDataUris);
             String linkContext = buildLinkContext(state.getLinksToFetch());
+
+            if (!imageDesc.isEmpty()) {
+                String latestMessageId = state.getPendingMessageIds().stream()
+                        .filter(id -> id != null && !id.isBlank())
+                        .reduce((first, second) -> second)
+                        .orElse(null);
+                bot.attachInboundImageData("group", gid, userId, latestMessageId,
+                        buildImageDataJson(imageInfoMaps, imageDesc));
+            }
+
+            // Vision 描述完成 → 触发 ImageDescribed 事件，让 StickerHarvesterListener 异步入库
+            // 最多 3 张图，URL 与 imageInfoMaps 对应
+            fireImageDescribed(gid, userId, imageInfoMaps, imageDesc);
 
             for (int attempt = 0; attempt <= config.maxRegenerate(); attempt++) {
                 if (attempt > 0) {
@@ -426,15 +607,27 @@ public class AIHandler implements MessageHandler {
 
             String groupSessionId = com.start.service.SessionId.groupConversation(gid, String.valueOf(userId));
             if (reply != null && !reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
-                sendSplitGroupReplies(bot, groupId, reply, groupSessionId);
-                aiService.commitGeneration(groupSessionId, String.valueOf(userId),
-                        state.getMergedText(), reply, gid);
-                if (moodService != null) moodService.onBotSpeak(gid);
-                runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed, dc));
+                boolean delivered = sendSplitGroupReplies(bot, groupId, reply, groupSessionId);
+                if (delivered) {
+                    recordDeliveredReaction(gid, userId);
+                    if (event == ConversationEvent.PROBABILISTIC) recordProactiveDelivery(gid);
+                    aiService.commitGeneration(groupSessionId, String.valueOf(userId),
+                            state.getMergedText(), reply, gid);
+                    if (moodService != null) moodService.onBotSpeak(gid);
+                    runtime.fire(new RuntimeEvent.CommitFinished(gid, userId, genResult, elapsed, dc));
+                } else {
+                    logDecision(gid, userId, event.name(), "SILENT", "send_failed",
+                            genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
+                }
             } else {
-                bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？", groupSessionId);
+                boolean delivered = bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？", groupSessionId);
+                if (delivered) {
+                    recordDeliveredReaction(gid, userId);
+                    if (event == ConversationEvent.PROBABILISTIC) recordProactiveDelivery(gid);
+                }
                 logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
-                        "REPLY", "fallback", genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
+                        delivered ? "REPLY" : "SILENT", delivered ? "fallback" : "send_failed",
+                        genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
             }
 
             conversationManager.remove(gid, userId);
@@ -533,6 +726,14 @@ public class AIHandler implements MessageHandler {
     }
 
     private void handlePrivateMessage(Main bot, JsonNode msg, long userId, String rawMessage, String plainText, String nickname, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
+        // 管理员私聊表情包管理命令：直达 service，绕过 LLM
+        if (ToolAuthorizationService.getInstance().isAdmin(String.valueOf(userId))) {
+            String adminResult = tryHandleAdminStickerCommand(bot, msg, String.valueOf(userId), rawMessage);
+            if (adminResult != null) {
+                bot.sendReply(msg, adminResult);
+                return;
+            }
+        }
         String prompt = buildReplyContext(msg, bot) + extractPrompt(rawMessage, plainText);
         String sessionId = "private_" + userId;
 
@@ -573,15 +774,18 @@ public class AIHandler implements MessageHandler {
     private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
         groupExecutor.execute(sessionId, () -> {
             List<String> imageDataUris = downloadImages(imageInfos);
-            String imageDesc = aiService.describeImages(imageDataUris);
+            String imageDesc = describeImagesWithCache(imageInfos, imageDataUris);
             String linkContext = buildLinkContext(linksToFetch);
+            // 私聊图片也入库：groupId 传 null 表示"private"
+            fireImageDescribed(null, userId, imageInfos, imageDesc);
             String fullPrompt = prompt;
             if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
             if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
 
-            // 存储图片数据到 DB
+            // 回填到 Main 在入站时创建的同一条记录，不在 generate() 里插入重复用户消息。
             if (!imageDesc.isEmpty()) {
-                aiService.setPendingImageData(buildImageDataJson(imageInfos, imageDesc));
+                bot.attachInboundImageData("private", null, userId,
+                        originalMsg.path("message_id").asText(), buildImageDataJson(imageInfos, imageDesc));
             }
             String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds);
 
@@ -608,8 +812,9 @@ public class AIHandler implements MessageHandler {
      * 将 AI 回复拆分为多条短消息，并逐条发送（带打字延迟）。
      * 第二阶段 2.2：传 sessionId，AI 回复写入与用户消息同一 session。
      */
-    private void sendSplitGroupReplies(Main bot, long groupId, String fullReply, String sessionId) {
+    private boolean sendSplitGroupReplies(Main bot, long groupId, String fullReply, String sessionId) {
         List<String> parts = aiService.splitIntoShortMessages(fullReply);
+        boolean sent = false;
         for (int i = 0; i < parts.size(); i++) {
             String msg = parts.get(i).trim();
             if (msg.isEmpty()) continue;
@@ -619,11 +824,12 @@ public class AIHandler implements MessageHandler {
                 Thread.sleep(delayMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                return sent;
             }
 
-            bot.sendGroupReply(groupId, msg, sessionId);
+            sent |= bot.sendGroupReply(groupId, msg, sessionId);
         }
+        return sent;
     }
 
     /** 获取链接预览上下文，失败则返回空 */
@@ -639,6 +845,139 @@ public class AIHandler implements MessageHandler {
             }
         }
         return sb.toString().trim();
+    }
+
+    /**
+     * 触发 ImageDescribed 事件。每张图一个事件，StickerHarvesterListener 会异步入库。
+     * 最多 3 张图，避免单条消息触发太多 Vision→入库 链路。
+     */
+    private void fireImageDescribed(String groupId, String userId, List<Map<String, String>> imageInfoMaps, String imageDesc) {
+        if (imageInfoMaps == null || imageInfoMaps.isEmpty() || imageDesc == null || imageDesc.isEmpty()) return;
+        int limit = Math.min(imageInfoMaps.size(), 3);
+        for (int i = 0; i < limit; i++) {
+            String url = imageInfoMaps.get(i).get("url");
+            if (url == null || url.isEmpty()) continue;
+            try {
+                runtime.fire(new RuntimeEvent.ImageDescribed(groupId, userId, url, imageDesc));
+            } catch (Exception e) {
+                logger.debug("fire ImageDescribed 失败: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Vision 描述（带 sticker-ingest 缓存复用）。StickerHarvesterListener 在 handle 入口就 fire 了
+     * ImageReceived 并开始 vision 描述，本方法查 cache 命中就直接返回，避免重复 vision 调用。
+     * 命中条件：imageInfoMaps 第一张图的 url 在 sticker-ingest vision 缓存里（60s 内）。
+     */
+    private String describeImagesWithCache(List<Map<String, String>> imageInfoMaps, List<String> imageDataUris) {
+        if (imageInfoMaps == null || imageInfoMaps.isEmpty()) return "";
+        try {
+            StickerIngestService sticker = StickerIngestService.getInstance();
+            String firstUrl = imageInfoMaps.get(0).get("url");
+            if (firstUrl != null) {
+                String cached = sticker.tryGetVisionDescription(firstUrl);
+                if (cached != null && !cached.isBlank()) {
+                    logger.debug("vision 描述命中 sticker-ingest 缓存: url={}", firstUrl);
+                    return cached;
+                }
+            }
+        } catch (Exception ignored) {
+            // sticker-ingest 未初始化就降级
+        }
+        // cache 未命中，调 vision
+        String desc = aiService.describeImages(imageDataUris);
+        if (desc != null && !desc.isBlank()) {
+            try {
+                StickerIngestService sticker = StickerIngestService.getInstance();
+                for (Map<String, String> img : imageInfoMaps) {
+                    String url = img.get("url");
+                    if (url != null) sticker.cacheVisionDescription(url, desc);
+                }
+            } catch (Exception ignored) {}
+        }
+        return desc == null ? "" : desc;
+    }
+
+    // ===== 管理员表情包管理命令（私聊入口） =====
+
+    private static final java.util.regex.Pattern ADMIN_STICKER_CMD =
+            java.util.regex.Pattern.compile(
+                    "^\\s*(fix|纠正|修改|set|list|列表|ls|remove|删除|delete)\\s+(sticker|表情包|贴纸)?\\s*(.*)$",
+                    java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 解析管理员私聊表情包命令。返回结果消息；非命令返回 null（让上层走正常 LLM 流程）。
+     *
+     * <p>支持语法：
+     * <pre>
+     *   fix sticker a3f8e91c 关键词: 哈哈 裂开 崩溃
+     *   list sticker 哈哈
+     *   list                    （列出全部）
+     *   remove sticker a3f8e91c
+     * </pre>
+     */
+    private String tryHandleAdminStickerCommand(Main bot, JsonNode msg, String adminUserId, String rawMessage) {
+        if (rawMessage == null) return null;
+        java.util.regex.Matcher m = ADMIN_STICKER_CMD.matcher(rawMessage.trim());
+        if (!m.find()) return null;
+        String verb = m.group(1).toLowerCase();
+        String rest = m.group(3) == null ? "" : m.group(3).trim();
+        if (rest.isEmpty() && !verb.equals("list") && !verb.equals("ls") && !verb.equals("列表")) {
+            return "用法：fix sticker <id> 关键词: a b c\n或：list sticker [过滤]\n或：remove sticker <id>";
+        }
+        try {
+            StickerIngestService service = StickerIngestService.getInstance();
+            switch (verb) {
+                case "list":
+                case "ls":
+                case "列表": {
+                    String filter = rest.isEmpty() ? null : rest;
+                    java.util.List<StickerIngestService.StickerRecord> all =
+                            filter != null ? service.searchByKeyword(filter) : service.getAllStickers();
+                    if (all.isEmpty()) return filter != null ? "未找到匹配 " + filter + " 的 sticker" : "sticker 库为空";
+                    StringBuilder sb = new StringBuilder("📦 sticker 库（").append(all.size()).append(" 条）\n");
+                    int max = Math.min(all.size(), 20);
+                    for (int i = 0; i < max; i++) {
+                        StickerIngestService.StickerRecord r = all.get(i);
+                        sb.append(String.format("- %s | file=%s | kw=[%s]%s\n",
+                                r.id, r.file,
+                                String.join(",", r.keywords),
+                                r.correctedBy != null ? " (✏️by " + r.correctedBy + ")" : ""));
+                    }
+                    if (all.size() > max) sb.append("...还有 ").append(all.size() - max).append(" 条");
+                    return sb.toString().trim();
+                }
+                case "remove":
+                case "删除":
+                case "delete": {
+                    String id = rest.split("\\s+")[0].trim();
+                    return service.remove(id);
+                }
+                case "fix":
+                case "纠正":
+                case "修改":
+                case "set": {
+                    // 解析 <id> 关键词: a b c
+                    String[] parts = rest.split("\\s+", 2);
+                    if (parts.length < 1 || parts[0].isEmpty()) return "缺少 sticker_id";
+                    String id = parts[0];
+                    String kwRaw = parts.length > 1 ? parts[1] : "";
+                    // 兼容 "关键词: a b c" / "kw: a b c" / "a b c"
+                    String stripped = kwRaw.replaceFirst("^(?:关键词|kw|keywords)\\s*[:：]\\s*", "");
+                    java.util.List<String> kws = StickerIngestService.parseKeywords(stripped);
+                    if (kws.isEmpty()) return "缺少 keywords";
+                    return service.correctKeywords(id, kws, adminUserId);
+                }
+                default:
+                    return null;
+            }
+        } catch (IllegalStateException e) {
+            return "StickerIngestService 未初始化（系统未就绪）";
+        } catch (Exception e) {
+            logger.warn("管理员命令执行失败: {}", e.getMessage(), e);
+            return "执行失败: " + e.getMessage();
+        }
     }
 
     /** 下载图片并转为 base64 data URI，失败则跳过 */

@@ -93,6 +93,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 
@@ -275,9 +276,7 @@ public class BaiLianService {
     // === 对话线程追踪（与 ConversationStateStore 共享） ===
     final Map<String, UserThread> userThreads = new ConcurrentHashMap<>();
     final Map<String, Deque<ContextEvent>> groupContexts = new ConcurrentHashMap<>();
-    private final ThreadLocal<String> pendingImageData = new ThreadLocal<>(); // AIHandler 设置图片数据，generate() 消费
     private final ThreadLocal<Boolean> suppressSessionWrite = ThreadLocal.withInitial(() -> false); // PR4: 控制 generate() 是否写 sessions
-    private final ThreadLocal<String> deferredImgData = new ThreadLocal<>(); // PR4: 延迟提交的图片数据，由 commitGeneration() 消费
 
     /** 待处理文件缓存 — key = sessionKey(group_xxx_yyy / private_xxx), value = 文件元数据列表 */
     private final Map<String, List<Map<String, String>>> pendingFiles = new ConcurrentHashMap<>();
@@ -422,26 +421,17 @@ public class BaiLianService {
         lastClearTime.put(sessionId, System.currentTimeMillis());
     }
 
-    /** 设 true 时 generate() 不写 sessions/DB，需调用方事后调 commitGeneration() 写入 */
+    /** 设 true 时 generate() 不写内存会话，需调用方在消息送达后调 commitGeneration()。 */
     public void setSuppressSessionWrite(boolean suppress) {
         suppressSessionWrite.set(suppress);
     }
 
     /**
-     * 延迟提交：在生成回复并发送成功后调用，持久化会话历史、DB 记录和追踪数据。
+     * 延迟提交：在生成回复并发送成功后调用，提交内存会话和运行时追踪数据。
      * 用于配合 setSuppressSessionWrite(true) 的 generate() 调用。
      */
     public void commitGeneration(String sessionId, String userId, String userPrompt,
                                   String reply, String groupId) {
-        // PR4: 读出延迟提交的图片数据
-        String imgData = deferredImgData.get();
-        deferredImgData.remove();
-        if (imgData != null && !imgData.isEmpty()) {
-            aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, 1L, imgData);
-        } else {
-            aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, 1L);
-        }
-
         List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
         synchronized (history) {
             if (lastClearTime.containsKey(sessionId)) {
@@ -557,8 +547,9 @@ public class BaiLianService {
             + "\n调用 search_chat_history / recall_memory 查日期时，用 yyyy-MM-dd 格式。今天=" + getTodayDateStr()
             + "（昨天/前天请自行 -1d / -2d）。"
             + "session history 已带 [MM-dd HH:mm] 时间戳，请直接看时间戳判断每条消息的时序；"
-            + "这些时间信息和历史消息前缀仅供内部判断时间和消息顺序，禁止在正常回复中输出、复述或模仿任何时间戳前缀；"
-            + "除非用户明确要求查询或说明时间。"
+            + "**【铁律】不允许在正常回复里带任何时间戳前缀**（如 [08-14 16:32] / [16:32] / (16:32) 等），"
+            + "也不允许模仿历史消息的时间戳格式输出。时间戳仅供内部判断时序，永远不要复述、引用、模仿；"
+            + "只有用户明确要求查询或说明时间时才输出时间信息。"
             + "若看到时间戳跨天/隔夜，说明是新的一天。";
 
         int publicContextLimit = publicContextLimit(event);
@@ -589,18 +580,7 @@ public class BaiLianService {
         }
 
         try {
-            Long isagent = 1L;
-            String imgData = pendingImageData.get();
-            pendingImageData.remove();
             boolean suppress = suppressSessionWrite.get();
-            if (suppress) {
-                // PR4: 延迟提交时把图片数据保留到 deferredImgData，由 commitGeneration() 消费
-                deferredImgData.set(imgData);
-            } else if (imgData != null && !imgData.isEmpty()) {
-                aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, isagent, imgData);
-            } else {
-                aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, isagent);
-            }
 
             List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
 
@@ -741,6 +721,21 @@ public class BaiLianService {
             ctx.publicGroupContext(publicGroupContext)
                .timeContext(timeContext)
                .allowSilence(allowSilence);
+
+            // 群成员全量（QQ → 显示名）—— 让 LLM @ 时知道 QQ 是什么，不瞎猜
+            if (groupId != null && botInstance != null && botInstance.getOneBotWsService() != null) {
+                try {
+                    long gidLong = Long.parseLong(groupId);
+                    Map<String, String> members = botInstance.getOneBotWsService()
+                            .getGroupMemberDisplayNamesAsync(gidLong)
+                            .get(5, TimeUnit.SECONDS);
+                    if (members != null && !members.isEmpty()) {
+                        ctx.groupMembers(members);
+                    }
+                } catch (Exception e) {
+                    logger.debug("群成员拉取失败 gid={}: {}", groupId, e.getMessage());
+                }
+            }
 
             // 群聊节奏
             if (metrics != null && groupId != null) {
@@ -1335,7 +1330,7 @@ public class BaiLianService {
         for (int i = 0; i < limit; i++) {
             try {
                 List<Map<String, Object>> content = new ArrayList<>();
-                content.add(Map.of("type", "text", "text", "请非常简短地描述这张图片的内容，用中文，控制在30字以内。不要加前缀如'这张图片'，直接说内容。"));
+                content.add(Map.of("type", "text", "text", "请描述这张图片，用中文，控制在50字以内。重点关注：1) 主体（人物/动物/物体） 2) 情绪与动作（是否夸张、拟人化、搞笑、可爱） 3) 是否有文字/字幕/水印 4) 整体风格（真实照片/二次元/卡通/梗图）。直接描述，不要加前缀。"));
                 content.add(Map.of("type", "image_url", "image_url", Map.of("url", imageDataUris.get(i))));
 
                 List<Map<String, Object>> messages = new ArrayList<>();
@@ -1344,7 +1339,10 @@ public class BaiLianService {
                 Map<String, Object> body = new HashMap<>();
                 body.put("model", visionModel);
                 body.put("messages", messages);
-                body.put("max_tokens", 150);
+                // MiMo-V2.5 是 reasoning model：先思考再回答。150 tokens 不够，思考就耗光预算。
+                // 设大点 + 强制 max_completion_tokens（如果模型支持）保证输出内容。
+                body.put("max_tokens", 800);
+                // body.put("max_completion_tokens", 800);  // 某些 OpenAI-style API 用这名
 
                 String requestBody = objectMapper.writeValueAsString(body);
 
@@ -1689,8 +1687,6 @@ public class BaiLianService {
         userThreads.put(key, new UserThread(System.currentTimeMillis(), fullBotReply));
     }
 
-    public void setPendingImageData(String json) { pendingImageData.set(json); }
-
     public boolean isWithinFollowUpWindow(String groupId, String userId) {
         String key = groupId + "_" + userId;
         UserThread thread = userThreads.get(key);
@@ -1735,7 +1731,12 @@ public class BaiLianService {
     public void addGroupMessage(String groupId, String message) {
         recordGroupContext(groupId, "unknown", "someone", message, "user_message");
     }
-    // 存储每个群最近 N 条完整发言（含发言人）
+    private static final int PUBLIC_HISTORY_MAX_MESSAGES = 30;
+    private static final long PUBLIC_HISTORY_MAX_AGE_MS = 20 * 60_000L;
+    private static final int PUBLIC_CONTEXT_CHAR_BUDGET = 1_600;
+    private static final int PUBLIC_MESSAGE_CHAR_LIMIT = 280;
+
+    // 存储每个群最近一小段完整发言（含发言人）；SceneState 负责更长跨度的主题压缩。
     private final Map<String, Deque<PublicMessage>> publicGroupHistory = new ConcurrentHashMap<>();
 
     public static class PublicMessage {
@@ -1766,14 +1767,23 @@ public class BaiLianService {
     static int publicContextLimit(ConversationEvent event) {
         if (event == null) return 0;
         return switch (event) {
-            case PROBABILISTIC -> 5;
-            case MENTION, PASSIVE_TRIGGER -> 3;
+            case PROBABILISTIC -> 8;
+            case MENTION, PASSIVE_TRIGGER -> 6;
             case FOLLOW_UP, AI_COMMENTED, AWAIT_REPLY, NOTHING -> 0;
         };
     }
 
     /** 构建有限的群背景；当前轮消息通过 message_id 排除，避免重复注入。 */
     static String buildPublicGroupContext(Deque<PublicMessage> recent, int limit, Set<String> excludedIds) {
+        return buildPublicGroupContext(recent, limit, excludedIds, PUBLIC_CONTEXT_CHAR_BUDGET);
+    }
+
+    /**
+     * 保留最新、最相关的原文，并用字符预算阻止一条超长消息挤掉整个群聊背景。
+     * 更长跨度的主题信息由已经注入 Prompt 的 SceneState 表达。
+     */
+    static String buildPublicGroupContext(Deque<PublicMessage> recent, int limit,
+                                          Set<String> excludedIds, int maxChars) {
         if (recent == null || recent.isEmpty() || limit <= 0) return "";
         Set<String> excluded = excludedIds == null ? Collections.emptySet() : excludedIds;
         List<PublicMessage> list = new ArrayList<>(recent);
@@ -1785,18 +1795,29 @@ public class BaiLianService {
             }
         }
         Collections.reverse(selected);
-        StringBuilder sb = new StringBuilder();
-        int included = 0;
-        for (PublicMessage m : selected) {
-            if (included == 0) {
-                sb.append("【群内最近讨论】（仅作为背景，不代表当前任务；不能仅凭消息数量判断刷屏）\n");
-            }
-            sb.append("[").append(formatRelativeTime(m.timestamp)).append("] ")
-                    .append(m.nickname).append("(").append(m.userId).append(")：")
-                    .append(m.content).append("\n");
-            included++;
+        String header = "【群内最近讨论】（仅作背景；较长话题以群聊场景为准）\n";
+        int budget = Math.max(header.length() + 1, maxChars);
+        List<String> rendered = new ArrayList<>();
+        int used = header.length();
+        for (int i = selected.size() - 1; i >= 0; i--) {
+            PublicMessage m = selected.get(i);
+            String content = truncateContextText(m.content, PUBLIC_MESSAGE_CHAR_LIMIT);
+            String line = "[" + formatRelativeTime(m.timestamp) + "] "
+                    + m.nickname + "(" + m.userId + ")：" + content + "\n";
+            if (used + line.length() > budget) break;
+            rendered.add(line);
+            used += line.length();
         }
-        return sb.toString().trim();
+        if (rendered.isEmpty()) return "";
+        Collections.reverse(rendered);
+        return (header + String.join("", rendered)).trim();
+    }
+
+    private static String truncateContextText(String content, int maxChars) {
+        if (content == null) return "";
+        String compact = content.replaceAll("\\s+", " ").trim();
+        if (compact.length() <= maxChars) return compact;
+        return compact.substring(0, Math.max(0, maxChars - 3)) + "...";
     }
 
     public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message, String messageId) {
@@ -1807,12 +1828,11 @@ public class BaiLianService {
 
         Deque<PublicMessage> history = publicGroupHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
 
-        // 清理过期消息（比如 10 分钟前的）
+        // 清理过期消息；更久的主题由持久化 SceneState 表示。
         long now = System.currentTimeMillis();
-        history.removeIf(msg -> now - msg.timestamp > 10 * 60_000);
+        history.removeIf(msg -> now - msg.timestamp > PUBLIC_HISTORY_MAX_AGE_MS);
 
-        // 保留最近 10 条
-        if (history.size() >= 10) {
+        if (history.size() >= PUBLIC_HISTORY_MAX_MESSAGES) {
             history.pollFirst();
         }
 
@@ -1824,8 +1844,8 @@ public class BaiLianService {
 
         Deque<PublicMessage> history = publicGroupHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
         long now = System.currentTimeMillis();
-        history.removeIf(msg -> now - msg.timestamp > 10 * 60_000);
-        if (history.size() >= 10) {
+        history.removeIf(msg -> now - msg.timestamp > PUBLIC_HISTORY_MAX_AGE_MS);
+        if (history.size() >= PUBLIC_HISTORY_MAX_MESSAGES) {
             history.pollFirst();
         }
         history.offerLast(new PublicMessage("", String.valueOf(BOT_QQ), "糖果熊", message));

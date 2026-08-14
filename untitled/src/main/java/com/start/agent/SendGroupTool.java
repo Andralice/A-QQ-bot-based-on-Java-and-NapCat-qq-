@@ -32,7 +32,11 @@ public class SendGroupTool implements Tool {
         return Map.of("type", "object",
                 "properties", Map.of(
                         "group_id", Map.of("type", "string", "description", "目标群号"),
-                        "message", Map.of("type", "string", "description", "要发送的内容，@人用[CQ:at,qq=QQ号]")
+                        "message", Map.of("type", "string",
+                                "description", "要发送的内容。"
+                                        + "@某人用 [CQ:at,qq=QQ号]（QQ号见 prompt 里的【群里的人】列表）。"
+                                        + "@ 群员是日常交流的常见方式：用户让你传话、你想回应当前聊天的人、重要通知（活动/截止/事件）都可以 @。"
+                                        + "但别无意义地 @，会骚扰群友。")
                 ),
                 "required", Arrays.asList("group_id", "message"));
     }

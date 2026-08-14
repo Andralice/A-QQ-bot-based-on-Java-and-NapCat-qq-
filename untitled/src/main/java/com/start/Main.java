@@ -10,6 +10,7 @@ import com.start.handler.HandlerRegistry;
 import com.start.repository.GroupMessageStatsRepository;
 import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.RecurringTaskRepository;
+import com.start.util.MessageUtil;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -314,7 +315,7 @@ public class Main extends WebSocketClient {
                     }
                 }
 
-                // 全量存储消息（群聊+私聊），供 search_chat_history 查询
+                // OneBot 入站事件是用户消息的唯一写入口：保留协议原文，同时存检索用的纯文本。
                 try {
                     String saveSessionId;
                     String saveGroupId = null;
@@ -325,7 +326,11 @@ public class Main extends WebSocketClient {
                         saveGroupId = String.valueOf(event.path("group_id").asLong());
                         saveSessionId = "group_" + saveGroupId + "_" + userId;
                     }
-                    messageService.saveUserMessage(saveSessionId, String.valueOf(userId), saveGroupId, rawMessage, isPrivate);
+                    String plainMessage = MessageUtil.extractPlainText(event.path("message")).trim();
+                    String sourceEventKey = MessageService.sourceEventKey(
+                            messageType, saveGroupId, String.valueOf(userId), event.path("message_id").asText());
+                    messageService.saveInboundUserMessage(saveSessionId, String.valueOf(userId), saveGroupId,
+                            rawMessage, plainMessage, isPrivate, sourceEventKey);
                 } catch (Exception e) {
                     logger.warn("保存消息失败: {}", e.getMessage());
                 }
@@ -366,6 +371,14 @@ public class Main extends WebSocketClient {
             return;
         }
         reconnectScheduler.schedule(this::attemptReconnect, 5, TimeUnit.SECONDS);
+    }
+
+    /** 补充已入库 OneBot 入站消息的视觉描述，不再插入第二条用户消息。 */
+    public void attachInboundImageData(String messageType, String groupId, String userId,
+                                       String messageId, String imageData) {
+        if (messageService == null) return;
+        String key = MessageService.sourceEventKey(messageType, groupId, userId, messageId);
+        messageService.attachImageData(key, imageData);
     }
 
     /**

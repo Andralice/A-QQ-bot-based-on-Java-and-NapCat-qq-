@@ -97,6 +97,10 @@ public class ConversationInterpreter {
     /** 速率控制 — 委托 StateStore */
     public boolean canReact(String groupId) { return stateStore.canReact(groupId); }
     public void recordReaction(String groupId) { stateStore.recordReaction(groupId); }
+    public boolean isNegativeCooldown(String groupId) { return stateStore.isNegativeCooldown(groupId); }
+    public void setNegativeCooldown(String groupId, long durationMs) {
+        stateStore.setNegativeCooldown(groupId, durationMs);
+    }
 
     /** 是否为追问消息 */
     boolean isFollowUpMessage(String msg) {

@@ -93,6 +93,14 @@ public class PromptBuilder {
             sb.append("\n（要@某人时，必须用 [CQ:at,qq=QQ号] 格式。禁止写 @别称 这种纯文本，QQ收不到。）");
         }
 
+        // 群成员全量（QQ → 显示名）—— LLM @ 时直接拿 QQ，0 盲区
+        if (ctx.groupMembers != null && !ctx.groupMembers.isEmpty()) {
+            sb.append("\n\n【群里的人（@时用 QQ号）】");
+            ctx.groupMembers.forEach((uid, name) ->
+                    sb.append("\n- ").append(uid).append(" = ").append(name));
+            sb.append("\n要 @ 谁就发 [CQ:at,qq=QQ号]（QQ号在上面），别用纯文本 @。");
+        }
+
         // 当前用户所在地
         if (ctx.userLocation != null && !ctx.userLocation.isEmpty()) {
             sb.append("\n\n当前用户所在地：").append(ctx.userLocation).append("（查天气时若未指定城市则默认使用）");
@@ -100,7 +108,7 @@ public class PromptBuilder {
 
         // @ 状态
         sb.append("\n\n").append(ctx.isAtBot
-                ? "【你被 @ 了】这条消息是直接对你说的，请回复。"
+                ? "【你被 @ 了】用户只叫了你一下，这种——可能只是想引起你注意/确认你在，不一定有具体问题或指令。**怎么回、要不要回长内容、要不要调工具，自己判断**。如果只是「@糖果熊」没别的字，1-5 字简单回（「在呢」「咋了」）就够；带了具体问题再认真答。"
                 : "【你没有被 @】这条消息不是对你说的，是群友之间的对话。你可以选择插话回应，也可以安静旁观，不用硬回。");
 
         // 本条消息 @ 了谁
@@ -142,6 +150,31 @@ public class PromptBuilder {
         // 待处理文件
         if (ctx.pendingFilesHint != null && !ctx.pendingFilesHint.isEmpty()) {
             sb.append(ctx.pendingFilesHint);
+        }
+
+        // 你的表情包库概要 —— 只显示真图（legacy face fallback 不算表情包，不显示给 LLM）
+        try {
+            com.start.service.StickerIngestService svc = com.start.service.StickerIngestService.getInstance();
+            java.util.List<com.start.service.StickerIngestService.StickerRecord> all = svc.getAllStickers();
+            java.util.List<com.start.service.StickerIngestService.StickerRecord> real = new java.util.ArrayList<>();
+            java.util.Set<String> allKeywords = new java.util.LinkedHashSet<>();
+            for (com.start.service.StickerIngestService.StickerRecord r : all) {
+                if (r.file != null && !r.file.isBlank()) {
+                    real.add(r);
+                    if (r.keywords != null) allKeywords.addAll(r.keywords);
+                }
+            }
+            sb.append("\n\n【你的表情包库】共 ").append(real.size()).append(" 张真图");
+            if (!allKeywords.isEmpty()) {
+                sb.append("\n可用关键词：").append(String.join("、", allKeywords.stream().limit(30).toList()));
+            }
+            if (real.isEmpty()) {
+                sb.append("\n库还是空的，群里发图会自动积累。调用 send_sticker 时如果库空，会自动回退到 QQ 内置 face（[CQ:face,id=14] 等）。");
+            } else {
+                sb.append("\n调用 send_sticker 工具发图（选情绪关键词）；想直接发 QQ face 用 [CQ:face,id=14]。");
+            }
+        } catch (Exception e) {
+            // ignore — StickerIngestService 未初始化时跳过
         }
 
         // 群聊场景（Thread 列表 → 群氛围叙事）— 最外层，群级上下文
