@@ -165,6 +165,8 @@ public class DatabaseConfig {
                 "session_id VARCHAR(100) NOT NULL," +
                 "user_id VARCHAR(50) NOT NULL," +
                 "content TEXT NOT NULL," +
+                "raw_content TEXT," +
+                "source_event_key VARCHAR(180)," +
                 "is_robot_reply BOOLEAN DEFAULT FALSE," +
                 "is_private BOOLEAN DEFAULT FALSE," +
                 "group_id VARCHAR(50)," +
@@ -174,10 +176,14 @@ public class DatabaseConfig {
                 "INDEX idx_msg_group (group_id)," +
                 "INDEX idx_msg_user (user_id)," +
                 "INDEX idx_msg_created (created_at DESC)," +
-                "INDEX idx_msg_session (session_id)" +
+                "INDEX idx_msg_session (session_id)," +
+                "UNIQUE KEY uq_msg_source_event (source_event_key)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
             "ALTER TABLE messages ADD COLUMN image_data TEXT COMMENT 'JSON image url+desc' AFTER content",
+            "ALTER TABLE messages ADD COLUMN raw_content TEXT AFTER content",
+            "ALTER TABLE messages ADD COLUMN source_event_key VARCHAR(180)",
+            "ALTER TABLE messages ADD UNIQUE INDEX uq_msg_source_event (source_event_key)",
 
             // 主动回复决策日志表
             "CREATE TABLE IF NOT EXISTS active_reply_logs (" +
@@ -485,9 +491,11 @@ public class DatabaseConfig {
                 stmt.execute(sql);
                 logger.debug("迁移成功: {}", sql.substring(0, Math.min(60, sql.length())));
             } catch (SQLException e) {
-                // MySQL 5.x 不支持 IF NOT EXISTS for columns，忽略 "Duplicate column" 错误
-                if (e.getMessage() != null && e.getMessage().contains("Duplicate column")) {
-                    logger.debug("列已存在，跳过: {}", sql.substring(0, Math.min(60, sql.length())));
+                // MySQL 5.x 不支持 IF NOT EXISTS for columns/indexes，忽略已存在错误。
+                String migrationError = e.getMessage();
+                if (migrationError != null && (migrationError.contains("Duplicate column")
+                        || migrationError.contains("Duplicate key name"))) {
+                    logger.debug("迁移对象已存在，跳过: {}", sql.substring(0, Math.min(60, sql.length())));
                 } else {
                     logger.error("迁移失败 ({}): {}", e.getMessage(), sql.substring(0, Math.min(60, sql.length())));
                     failures.add(e.getMessage() != null ? e.getMessage() : "unknown migration error");

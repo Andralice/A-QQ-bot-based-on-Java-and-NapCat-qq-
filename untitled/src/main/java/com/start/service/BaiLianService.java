@@ -67,6 +67,7 @@ import com.start.repository.WorkingMemoryRepository;
 import com.start.service.EggGroupDataCenter;
 import com.start.thread.SceneState;
 import com.start.thread.ThreadManager;
+import com.start.util.BailianRetryExecutor;
 import com.hankcs.hanlp.HanLP;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
@@ -911,31 +912,11 @@ public class BaiLianService {
                     .timeout(Duration.ofMillis(this.bailianTimeoutMs))
                     .build();
 
-            HttpResponse<String> response = null;
-            int retryCount = 0;
-            int maxRetries = this.bailianMaxRetries;
-            
-            while (retryCount <= maxRetries) {
-                try {
-                    response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-                    break;
-                } catch (java.net.http.HttpTimeoutException e) {
-                    retryCount++;
-                    if (retryCount > maxRetries) {
-                        logger.warn("Gemini API 重试{}次后仍超时", maxRetries);
-                        throw e;
-                    }
-                    logger.warn("Gemini API 第{}次超时，正在重试...", retryCount);
-                    Thread.sleep(1000 * retryCount);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("请求被中断", e);
-                }
-            }
-
-            if (response == null) {
-                throw new RuntimeException("AI 服务请求失败：响应为空");
-            }
+            HttpResponse<String> response = BailianRetryExecutor.executeHttp(
+                    "百炼 API 主请求",
+                    () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                    this.bailianMaxRetries
+            );
 
             if (response.statusCode() != 200) {
                 logger.warn("Gemini API HTTP 错误 {}: {}", response.statusCode(), response.body());
@@ -1111,39 +1092,30 @@ public class BaiLianService {
 
                 String nextBodyJson = objectMapper.writeValueAsString(nextBody);
                 JsonNode nextMsg = null;
-                int toolRetryCount = 0;
-
-                while (toolRetryCount <= this.bailianMaxRetries) {
-                    try {
-                        HttpRequest nextReq = HttpRequest.newBuilder()
-                                .uri(URI.create(url))
-                                .header("Authorization", "Bearer " + apiKey)
-                                .header("Content-Type", "application/json")
-                                .POST(HttpRequest.BodyPublishers.ofString(nextBodyJson))
-                                .timeout(Duration.ofMillis(this.bailianTimeoutMs))
-                                .build();
-                        HttpResponse<String> nextResp = httpClient.send(nextReq, HttpResponse.BodyHandlers.ofString());
-                        if (nextResp.statusCode() == 200) {
-                            JsonNode sr = objectMapper.readTree(nextResp.body());
-                            JsonNode sc = sr.path("choices");
-                            if (sc.isArray() && !sc.isEmpty()) {
-                                nextMsg = sc.get(0).path("message");
-                                break;
-                            }
+                try {
+                    HttpResponse<String> nextResp = BailianRetryExecutor.executeHttp(
+                            "百炼 API 工具第" + toolRound + "轮",
+                            () -> {
+                                HttpRequest nextReq = HttpRequest.newBuilder()
+                                        .uri(URI.create(url))
+                                        .header("Authorization", "Bearer " + apiKey)
+                                        .header("Content-Type", "application/json")
+                                        .POST(HttpRequest.BodyPublishers.ofString(nextBodyJson))
+                                        .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                                        .build();
+                                return httpClient.send(nextReq, HttpResponse.BodyHandlers.ofString());
+                            },
+                            this.bailianMaxRetries
+                    );
+                    if (nextResp.statusCode() == 200) {
+                        JsonNode sr = objectMapper.readTree(nextResp.body());
+                        JsonNode sc = sr.path("choices");
+                        if (sc.isArray() && !sc.isEmpty()) {
+                            nextMsg = sc.get(0).path("message");
                         }
-                        toolRetryCount++;
-                    } catch (java.net.http.HttpTimeoutException e) {
-                        toolRetryCount++;
-                        if (toolRetryCount > this.bailianMaxRetries) {
-                            logger.warn("工具第{}轮回调超时，已重试{}次", toolRound, this.bailianMaxRetries);
-                        } else {
-                            logger.warn("工具第{}轮回调第{}次超时，正在重试...", toolRound, toolRetryCount);
-                            Thread.sleep(1000L * toolRetryCount);
-                        }
-                    } catch (Exception e) {
-                        logger.warn("工具第{}轮回调失败: {}", toolRound, e.getMessage());
-                        break;
                     }
+                } catch (Exception e) {
+                    logger.warn("工具第{}轮回调失败: {}", toolRound, e.getMessage());
                 }
 
                 if (nextMsg != null) {

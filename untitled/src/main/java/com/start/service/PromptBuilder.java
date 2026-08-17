@@ -40,7 +40,16 @@ public class PromptBuilder {
      * @return 完整 system prompt
      */
     public String build(String basePrompt, PromptContext ctx) {
-        StringBuilder sb = new StringBuilder(basePrompt);
+        StringBuilder sb = new StringBuilder();
+
+        // 【当前时间】必须放在 system prompt 最前面 —— flash 模型对长 context 末段注意衰减严重，
+        // 原本放在中后段会被当成"如何回应 @"的延续忽略（实测 17:29:30 答错日期 2 个多月）。
+        // 放最前面 + \n\n 分隔，LLM 第一眼就能读到事实锚点。
+        if (ctx.timeContext != null && !ctx.timeContext.isEmpty()) {
+            sb.append(ctx.timeContext).append("\n\n");
+        }
+
+        sb.append(basePrompt);
 
         // 情绪
         if (ctx.moodDescription != null && !ctx.moodDescription.isEmpty()) {
@@ -129,10 +138,8 @@ public class PromptBuilder {
             sb.append(ctx.publicGroupContext);
         }
 
-        // 时间
-        if (ctx.timeContext != null && !ctx.timeContext.isEmpty()) {
-            sb.append(ctx.timeContext);
-        }
+        // 时间已移到 build() 开头 —— flash 模型长 context 末段注意衰减，不能放这里
+        // （否则会被【你被 @ 了】段吞掉，LLM 读到也当 @ 规则的补充忽略）
 
         // 群聊节奏
         if (ctx.metricsHint != null && !ctx.metricsHint.isEmpty()) {

@@ -52,6 +52,8 @@ class DatabaseMigrationIdempotentIntegrationTest {
     void criticalColumnsPresentAfterMigration() throws Exception {
         try (Connection conn = DatabaseConfig.getConnection()) {
             assertColumnExists(conn, "messages", "image_data");
+            assertColumnExists(conn, "messages", "raw_content");
+            assertColumnExists(conn, "messages", "source_event_key");
             assertColumnExists(conn, "messages", "topics");
             assertColumnExists(conn, "long_term_memories", "trigger_claimed_at");
             assertColumnExists(conn, "recurring_tasks", "fire_claimed_at");

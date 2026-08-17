@@ -20,9 +20,9 @@ class ConversationContextPolicyTest {
 
     @Test
     void explicitAndPassiveRepliesUseSmallBackgroundWindows() {
-        assertEquals(3, BaiLianService.publicContextLimit(ConversationEvent.MENTION));
-        assertEquals(3, BaiLianService.publicContextLimit(ConversationEvent.PASSIVE_TRIGGER));
-        assertEquals(5, BaiLianService.publicContextLimit(ConversationEvent.PROBABILISTIC));
+        assertEquals(6, BaiLianService.publicContextLimit(ConversationEvent.MENTION));
+        assertEquals(6, BaiLianService.publicContextLimit(ConversationEvent.PASSIVE_TRIGGER));
+        assertEquals(8, BaiLianService.publicContextLimit(ConversationEvent.PROBABILISTIC));
     }
 
     @Test
@@ -58,5 +58,18 @@ class ConversationContextPolicyTest {
 
         assertTrue(context.contains("旧背景"));
         assertFalse(context.contains("当前消息"));
+    }
+
+    @Test
+    void keepsNewestMessagesWithinCharacterBudget() {
+        var history = new ArrayDeque<BaiLianService.PublicMessage>();
+        history.add(new BaiLianService.PublicMessage("old", "u1", "甲", "旧消息"));
+        history.add(new BaiLianService.PublicMessage("new", "u2", "乙", "这是最新消息"));
+
+        String context = BaiLianService.buildPublicGroupContext(history, 2, Set.of(), 60);
+
+        assertTrue(context.contains("这是最新消息"));
+        assertFalse(context.contains("旧消息"));
+        assertTrue(context.length() <= 60);
     }
 }
