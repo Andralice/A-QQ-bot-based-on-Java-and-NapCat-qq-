@@ -33,6 +33,12 @@ TARGET_GROUP_ID=0
 # 调试模式
 DEBUG=false
 
+# Web Dashboard / 表情包审阅面板
+# 仅本机访问可使用 127.0.0.1；对外监听时必须配置 Token
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=8765
+DASHBOARD_TOKEN=replace-with-a-long-random-token
+
 # 私聊白名单
 PRIVATE_WHITELIST_ENABLED=false
 

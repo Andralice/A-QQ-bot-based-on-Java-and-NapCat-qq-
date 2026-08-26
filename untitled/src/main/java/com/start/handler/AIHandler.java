@@ -97,6 +97,8 @@ public class AIHandler implements MessageHandler {
         return t;
     });
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
+    /** 连续普通消息可与后续触发合并的最大窗口；群环境另由 publicGroupHistory 维护。 */
+    private static final long UNTRIGGERED_BUFFER_TTL_MS = 120_000L;
 
     /** 记忆查询意图关键词：rate_limited 时如果用户明显在问"你还记得..."，不沉默，先查记忆给短回复 */
     private static final String[] MEMORY_QUERY_KEYWORDS = {
@@ -229,8 +231,11 @@ public class AIHandler implements MessageHandler {
             }
         }
 
-        // 缓冲消息到 ConversationState（WebSocket 线程）
-        ConversationState conv = conversationManager.getOrCreate(gid, uid);
+        Long replyId = MessageUtil.extractReplyId(msg.path("message"));
+
+        // 用户短期连续消息保留在临时缓冲中；超过 120 秒、且从未提交给 AI 的缓冲
+        // 会在这里自动替换。群内环境仍由独立的 publicGroupHistory/SceneState 记录。
+        ConversationState conv = conversationManager.getOrCreatePending(gid, uid, UNTRIGGERED_BUFFER_TTL_MS);
         conv.addMessage(plainText, messageId);
         if (!imageInfos.isEmpty()) {
             for (Map<String, String> img : imageInfos) {
@@ -240,7 +245,6 @@ public class AIHandler implements MessageHandler {
         for (String link : linksToFetch) {
             conv.addLink(link);
         }
-        Long replyId = MessageUtil.extractReplyId(msg.path("message"));
         if (replyId != null) conv.setReplyToMessageId(replyId);
         conv.incrementRevision();
 
@@ -266,6 +270,7 @@ public class AIHandler implements MessageHandler {
                 conversationManager.remove(gid, uid);
                 return;
             }
+            conv.markSubmitted();
             long t0 = System.currentTimeMillis();
             runGroupConversation(bot, groupId, gid, uid, nickname, ats, false, t0, ConversationEvent.MENTION);
             return;
@@ -297,6 +302,7 @@ public class AIHandler implements MessageHandler {
                 logDecision(gid, uid, result.event().name(), "SILENT", decision.reason(), 0, 0, 0);
                 return;
             }
+            conv.markSubmitted();
             scheduleProactiveReply(bot, groupId, gid, uid, nickname, ats, result);
             return;
         }
@@ -360,6 +366,7 @@ public class AIHandler implements MessageHandler {
         }
 
         // 需要 AI 生成：只有 PROBABILISTIC 允许沉默
+        conv.markSubmitted();
         boolean allowSilence = result.event().allowsSilence();
         long startMs = System.currentTimeMillis();
         runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs, result.event());

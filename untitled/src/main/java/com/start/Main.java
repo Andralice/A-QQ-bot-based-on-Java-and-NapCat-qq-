@@ -58,12 +58,8 @@ public class Main extends WebSocketClient {
     });
 
     // ===== 白名单配置 =====
-
-    /** 允许交互的群聊 ID 集合，由 BotConfig 提供。 */
-    private static final Set<Long> ALLOWED_GROUPS = BotConfig.getAllowedGroups();
-
-    /** 允许私聊的用户 ID 集合（若启用私聊白名单）。 */
-    private static final Set<Long> ALLOWED_PRIVATE_USERS = BotConfig.getAllowedPrivateUsers();
+    // 注意：白名单检查改用 WhitelistService（运行时可改），不再用 static final 缓存。
+    // 开关仍由 BotConfig.isPrivateWhitelistEnabled() 提供（只读启动快照）。
 
     // ===== 核心服务实例（依赖注入） =====
 
@@ -253,10 +249,10 @@ public class Main extends WebSocketClient {
             String messageType = event.path("message_type").asText();
             boolean isAllowed = false;
 
-            // 判断是否在白名单内
+            // 判断是否在白名单内（走 WhitelistService，热生效）
             if ("group".equals(messageType)) {
                 long groupId = event.path("group_id").asLong();
-                if (ALLOWED_GROUPS.contains(groupId)) {
+                if (WhitelistService.getInstance().isAllowedGroup(groupId)) {
                     isAllowed = true;
                 } else {
                     logger.debug("🚫 忽略非白名单群消息 | group_id={}", groupId);
@@ -266,7 +262,7 @@ public class Main extends WebSocketClient {
                     isAllowed = true;
                     logger.debug("💬 接受私聊（白名单未启用）| user_id={}", userId);
                 } else {
-                    if (ALLOWED_PRIVATE_USERS.contains(userId)) {
+                    if (WhitelistService.getInstance().isAllowedPrivateUser(userId)) {
                         isAllowed = true;
                         logger.debug("💬 接受白名单私聊 | user_id={}", userId);
                     } else {

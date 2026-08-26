@@ -1,0 +1,1 @@
+*/1 * * * * root /opt/qq-bot/scripts/napcat_watchdog.sh >> /var/log/napcat_watchdog.log 2>&1

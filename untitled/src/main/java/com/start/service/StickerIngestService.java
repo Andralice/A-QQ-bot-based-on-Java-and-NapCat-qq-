@@ -87,8 +87,8 @@ public final class StickerIngestService {
     private BaiLianService baiLianService;
 
     private StickerIngestService() {
-        String jsonEnv = System.getenv("STICKER_JSON");
-        String dirEnv = System.getenv("STICKER_DIR");
+        String jsonEnv = System.getProperty("sticker.json", System.getenv("STICKER_JSON"));
+        String dirEnv = System.getProperty("sticker.dir", System.getenv("STICKER_DIR"));
         this.jsonPath = Paths.get(jsonEnv != null && !jsonEnv.isBlank() ? jsonEnv : "data/stickers.json");
         this.dirPath = Paths.get(dirEnv != null && !dirEnv.isBlank() ? dirEnv : "data/stickers/");
         initStorage();
@@ -169,11 +169,34 @@ public final class StickerIngestService {
     public byte[] readStickerBytes(StickerRecord r) {
         if (r == null || r.file == null || r.file.isBlank()) return null;
         try {
-            return Files.readAllBytes(dirPath.resolve(r.file));
+            Path filePath = resolveStickerPath(r.file);
+            return filePath == null ? null : Files.readAllBytes(filePath);
         } catch (IOException e) {
             logger.warn("读取 sticker 文件失败: {}", r.file, e);
             return null;
         }
+    }
+
+    /** 判断本地图片是否存在，不读取整张图片，供审阅列表使用。 */
+    public boolean hasStickerFile(StickerRecord r) {
+        if (r == null || r.file == null || r.file.isBlank()) return false;
+        Path filePath = resolveStickerPath(r.file);
+        return filePath != null && Files.isRegularFile(filePath);
+    }
+
+    /**
+     * 返回面板预览所需的图片 MIME 类型。文件路径来自受控的 sticker 元数据，
+     * 这里只按扩展名判断，不把原始 URL 暴露给浏览器。
+     */
+    public String stickerContentType(StickerRecord r) {
+        if (r == null || r.file == null) return "application/octet-stream";
+        String lower = r.file.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".gif")) return "image/gif";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".bmp")) return "image/bmp";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        return "application/octet-stream";
     }
 
     /**
@@ -203,7 +226,8 @@ public final class StickerIngestService {
         if (r == null) return "找不到 sticker: " + stickerId;
         records.remove(r);
         if (r.file != null && !r.file.isBlank()) {
-            try { Files.deleteIfExists(dirPath.resolve(r.file)); } catch (IOException ignored) {}
+            Path filePath = resolveStickerPath(r.file);
+            try { if (filePath != null) Files.deleteIfExists(filePath); } catch (IOException ignored) {}
         }
         persist();
         return "已删除 sticker: " + stickerId;
@@ -711,6 +735,14 @@ public final class StickerIngestService {
         } catch (Exception e) {
             logger.warn("写 stickers.json 失败: {}", e.getMessage());
         }
+    }
+
+    /** 只允许访问 sticker 目录内的相对文件，避免损坏的元数据造成路径穿越。 */
+    private Path resolveStickerPath(String file) {
+        if (file == null || file.isBlank()) return null;
+        Path root = dirPath.toAbsolutePath().normalize();
+        Path resolved = root.resolve(file).normalize();
+        return resolved.startsWith(root) ? resolved : null;
     }
 
     private static String abbreviate(String s, int max) {

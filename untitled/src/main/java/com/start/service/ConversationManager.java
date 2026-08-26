@@ -12,11 +12,27 @@ public class ConversationManager {
 
     private final ConcurrentHashMap<String, ConversationState> states = new ConcurrentHashMap<>();
 
-    public ConversationState getOrCreate(String groupId, String userId) {
+    public ConversationState getOrCreatePending(String groupId, String userId, long staleAfterMs) {
+        return getOrCreatePending(groupId, userId, staleAfterMs, System.currentTimeMillis());
+    }
+
+    /**
+     * Keeps a short unsubmitted buffer for immediate follow-up context, but never
+     * lets it survive long enough to contaminate a later explicit request.
+     */
+    ConversationState getOrCreatePending(String groupId, String userId, long staleAfterMs, long nowMs) {
         String key = key(groupId, userId);
-        ConversationState existing = states.get(key);
-        if (existing != null) return existing;
-        return states.computeIfAbsent(key, k -> new ConversationState(groupId, userId));
+        return states.compute(key, (ignored, existing) -> {
+            if (existing == null) return new ConversationState(groupId, userId);
+            boolean staleUnsubmitted = !existing.isSubmitted()
+                    && nowMs - existing.getLastMessageAt() > staleAfterMs;
+            if (staleUnsubmitted) {
+                logger.debug("Discarding stale unsubmitted conversation: {}_{} idle={}ms",
+                        groupId, userId, nowMs - existing.getLastMessageAt());
+                return new ConversationState(groupId, userId);
+            }
+            return existing;
+        });
     }
 
     public ConversationState get(String groupId, String userId) {

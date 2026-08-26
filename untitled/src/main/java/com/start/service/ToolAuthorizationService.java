@@ -60,7 +60,7 @@ public class ToolAuthorizationService {
     public boolean isAllowedGroup(String groupId) {
         if (groupId == null || groupId.isBlank()) return false;
         try {
-            return BotConfig.getAllowedGroups().contains(Long.parseLong(groupId));
+            return WhitelistService.getInstance().isAllowedGroup(Long.parseLong(groupId));
         } catch (NumberFormatException e) {
             return false;
         }

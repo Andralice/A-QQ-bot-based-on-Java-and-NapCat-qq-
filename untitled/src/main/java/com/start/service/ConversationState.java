@@ -20,12 +20,14 @@ public class ConversationState {
     private volatile int regenerateCount = 0;
     private volatile boolean submitted = false;
     private final long createdAt;
+    private volatile long lastMessageAt;
     private volatile Long replyToMessageId;
 
     public ConversationState(String groupId, String userId) {
         this.groupId = groupId;
         this.userId = userId;
         this.createdAt = System.currentTimeMillis();
+        this.lastMessageAt = createdAt;
     }
 
     public String getGroupId() { return groupId; }
@@ -34,6 +36,7 @@ public class ConversationState {
     public long getGeneration() { return generation.get(); }
     public int getRegenerateCount() { return regenerateCount; }
     public long getCreatedAt() { return createdAt; }
+    public long getLastMessageAt() { return lastMessageAt; }
     public boolean isSubmitted() { return submitted; }
 
     public long incrementRevision() { return messageRevision.incrementAndGet(); }
@@ -49,6 +52,7 @@ public class ConversationState {
         synchronized (pendingMessages) {
             pendingMessages.add(new MessageEntry(text, System.currentTimeMillis()));
             pendingMessageIds.add(messageId);
+            lastMessageAt = System.currentTimeMillis();
         }
     }
 

@@ -58,6 +58,7 @@ import com.start.agent.SearchDigestTool;
 import com.start.agent.evo.EvolutionHistoryTool;
 import com.start.agent.QueryImagesTool;
 import com.start.agent.SetWorkingMemoryTool;
+import com.start.agent.WhitelistTool;
 import com.start.model.WorkingMemory;
 import com.start.repository.BeliefRepository;
 import com.start.repository.MessageRepository;
@@ -857,6 +858,7 @@ public class BaiLianService {
                         new SelfEvolveTool(userId, evoRepo),
                         new RestartBotTool(userId),
                         new UpdateConfigTool(runtimeConfig, userId),
+                        new WhitelistTool(userId),
                         new ReadCodeTool(),
                         new CreateFileTool(userId),
                         new AuditTool(),

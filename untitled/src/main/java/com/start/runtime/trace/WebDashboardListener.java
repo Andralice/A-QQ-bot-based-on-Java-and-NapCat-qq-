@@ -5,15 +5,18 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.runtime.RuntimeEvent;
 import com.start.runtime.RuntimeListener;
+import com.start.service.StickerIngestService;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -132,6 +135,7 @@ public class WebDashboardListener implements RuntimeListener {
             server.createContext("/api/decisions", this::serveDecisions);
             server.createContext("/api/groups", this::serveGroups);
             server.createContext("/api/system", this::serveSystem);
+            server.createContext("/api/stickers", this::serveStickers);
             server.start();
             instance = this;
             logger.info("WebDashboard 已启动: http://{}:{}{}", host, port,
@@ -393,6 +397,186 @@ public class WebDashboardListener implements RuntimeListener {
         sendJson(ex, o.toString());
     }
 
+    // ===== 表情包审阅 API =====
+
+    /**
+     * 表情包审阅接口：列表、图片预览、修改关键词和删除都复用 StickerIngestService，
+     * 因此面板不会产生第二份缓存或绕过现有的持久化逻辑。
+     */
+    private void serveStickers(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        try {
+            String path = ex.getRequestURI().getPath();
+            String base = "/api/stickers";
+            if (path.equals(base) || path.equals(base + "/")) {
+                if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                    sendMethodNotAllowed(ex, "GET");
+                    return;
+                }
+                serveStickerList(ex);
+                return;
+            }
+            if (path.equals(base + "/image")) {
+                if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                    sendMethodNotAllowed(ex, "GET");
+                    return;
+                }
+                serveStickerImage(ex);
+                return;
+            }
+
+            String id = urlDecode(path.substring((base + "/").length()));
+            if (id.isBlank() || id.contains("/") || id.contains("\\")) {
+                sendJson(ex, 404, "{\"error\":\"sticker_not_found\"}");
+                return;
+            }
+            if ("PATCH".equalsIgnoreCase(ex.getRequestMethod())
+                    || "PUT".equalsIgnoreCase(ex.getRequestMethod())) {
+                updateStickerKeywords(ex, id);
+            } else if ("DELETE".equalsIgnoreCase(ex.getRequestMethod())) {
+                deleteSticker(ex, id);
+            } else {
+                sendMethodNotAllowed(ex, "PATCH, PUT, DELETE");
+            }
+        } catch (IllegalStateException e) {
+            sendJson(ex, 503, "{\"error\":\"sticker_service_unavailable\"}");
+        } catch (Exception e) {
+            logger.warn("表情包面板请求失败: {} {}", ex.getRequestMethod(), ex.getRequestURI(), e);
+            sendJson(ex, 500, "{\"error\":\"sticker_request_failed\"}");
+        }
+    }
+
+    private void serveStickerList(HttpExchange ex) throws IOException {
+        StickerIngestService service = StickerIngestService.getInstance();
+        String keyword = parseQuery(ex, "keyword");
+        String lower = keyword == null ? "" : keyword.trim().toLowerCase(java.util.Locale.ROOT);
+        ArrayNode arr = mapper.createArrayNode();
+        for (StickerIngestService.StickerRecord r : service.getAllStickers()) {
+            if (!lower.isEmpty() && !stickerMatches(r, lower)) continue;
+            ObjectNode o = mapper.createObjectNode();
+            o.put("id", nullToEmpty(r.id));
+            o.put("file", nullToEmpty(r.file));
+            o.put("hasImage", service.hasStickerFile(r));
+            o.put("description", nullToEmpty(r.description));
+            o.put("correctedBy", nullToEmpty(r.correctedBy));
+            o.put("correctedAt", r.correctedAt);
+            o.put("sourceGroup", nullToEmpty(r.sourceGroup));
+            o.put("createdAt", r.createdAt);
+            o.set("keywords", mapper.valueToTree(r.keywords == null ? List.of() : r.keywords));
+            o.set("autoKeywords", mapper.valueToTree(
+                    r.autoKeywords == null ? List.of() : r.autoKeywords));
+            arr.add(o);
+        }
+        sendJson(ex, arr.toString());
+    }
+
+    private void serveStickerImage(HttpExchange ex) throws IOException {
+        StickerIngestService service = StickerIngestService.getInstance();
+        String id = parseQuery(ex, "id");
+        StickerIngestService.StickerRecord record = service.getById(id);
+        byte[] bytes = record == null ? null : service.readStickerBytes(record);
+        if (bytes == null || bytes.length == 0) {
+            sendJson(ex, 404, "{\"error\":\"image_not_found\"}");
+            return;
+        }
+        ex.getResponseHeaders().set("Content-Type", service.stickerContentType(record));
+        ex.getResponseHeaders().set("Cache-Control", "no-store");
+        ex.sendResponseHeaders(200, bytes.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
+    private void updateStickerKeywords(HttpExchange ex, String id) throws IOException {
+        StickerIngestService service = StickerIngestService.getInstance();
+        if (service.getById(id) == null) {
+            sendJson(ex, 404, "{\"error\":\"sticker_not_found\"}");
+            return;
+        }
+        String body = readBody(ex, 64 * 1024);
+        var node = mapper.readTree(body);
+        var keywordsNode = node == null ? null : node.get("keywords");
+        if (keywordsNode == null || !keywordsNode.isArray()) {
+            sendJson(ex, 400, "{\"error\":\"keywords_must_be_array\"}");
+            return;
+        }
+        List<String> keywords = new ArrayList<>();
+        for (var item : keywordsNode) {
+            String value = item.asText("").trim();
+            if (!value.isEmpty()) {
+                if (value.length() > 40 || keywords.size() >= 20) {
+                    sendJson(ex, 400, "{\"error\":\"invalid_keywords\"}");
+                    return;
+                }
+                keywords.add(value);
+            }
+        }
+        if (keywords.isEmpty()) {
+            sendJson(ex, 400, "{\"error\":\"keywords_must_not_be_empty\"}");
+            return;
+        }
+        service.correctKeywords(id, keywords, "web-dashboard");
+        ObjectNode result = mapper.createObjectNode();
+        result.put("ok", true);
+        result.put("id", id);
+        result.set("keywords", mapper.valueToTree(keywords));
+        sendJson(ex, result.toString());
+    }
+
+    private void deleteSticker(HttpExchange ex, String id) throws IOException {
+        StickerIngestService service = StickerIngestService.getInstance();
+        if (service.getById(id) == null) {
+            sendJson(ex, 404, "{\"error\":\"sticker_not_found\"}");
+            return;
+        }
+        service.remove(id);
+        ObjectNode result = mapper.createObjectNode();
+        result.put("ok", true);
+        result.put("id", id);
+        sendJson(ex, result.toString());
+    }
+
+    private static boolean stickerMatches(StickerIngestService.StickerRecord r, String lower) {
+        if (containsIgnoreCase(r.id, lower) || containsIgnoreCase(r.description, lower)
+                || containsIgnoreCase(r.sourceGroup, lower)) return true;
+        return containsIgnoreCase(r.keywords, lower) || containsIgnoreCase(r.autoKeywords, lower);
+    }
+
+    private static boolean containsIgnoreCase(String value, String lower) {
+        return value != null && value.toLowerCase(java.util.Locale.ROOT).contains(lower);
+    }
+
+    private static boolean containsIgnoreCase(List<String> values, String lower) {
+        if (values == null) return false;
+        for (String value : values) if (containsIgnoreCase(value, lower)) return true;
+        return false;
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String urlDecode(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return value;
+        }
+    }
+
+    private static String readBody(HttpExchange ex, int maxBytes) throws IOException {
+        try (InputStream in = ex.getRequestBody()) {
+            byte[] bytes = in.readNBytes(maxBytes + 1);
+            if (bytes.length > maxBytes) throw new IOException("request body too large");
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+    }
+
+    private static void sendMethodNotAllowed(HttpExchange ex, String allow) throws IOException {
+        ex.getResponseHeaders().set("Allow", allow);
+        sendJson(ex, 405, "{\"error\":\"method_not_allowed\"}");
+    }
+
     // ===== 工具方法 =====
 
     private static String parseQuery(HttpExchange ex, String key) {
@@ -400,7 +584,7 @@ public class WebDashboardListener implements RuntimeListener {
         if (q == null) return null;
         for (String pair : q.split("&")) {
             String[] kv = pair.split("=", 2);
-            if (kv.length == 2 && kv[0].equals(key)) return kv[1];
+            if (kv.length == 2 && kv[0].equals(key)) return urlDecode(kv[1]);
         }
         return null;
     }
@@ -418,10 +602,14 @@ public class WebDashboardListener implements RuntimeListener {
     }
 
     private static void sendJson(HttpExchange ex, String json) throws IOException {
+        sendJson(ex, 200, json);
+    }
+
+    private static void sendJson(HttpExchange ex, int status, String json) throws IOException {
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
-        ex.sendResponseHeaders(200, bytes.length);
+        ex.sendResponseHeaders(status, bytes.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(bytes);
         }
@@ -492,6 +680,26 @@ public class WebDashboardListener implements RuntimeListener {
                         padding:3px 0; border-bottom:1px solid #1e1e36; }
             .tool-row .name { color:var(--text); }
             .tool-row .count { color:var(--accent); font-weight:600; }
+            .sticker-panel { margin-top:16px; }
+            .sticker-toolbar { display:flex; gap:8px; margin-bottom:14px; }
+            .sticker-toolbar input { flex:1; min-width:160px; background:#111120; color:var(--text);
+                                     border:1px solid var(--border); border-radius:6px; padding:8px 10px; }
+            button { background:#31315a; color:var(--text); border:1px solid #4a4a78; border-radius:6px;
+                     padding:7px 12px; cursor:pointer; }
+            button:hover { background:#454578; }
+            button.danger { color:var(--red); border-color:#73364b; }
+            .sticker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; }
+            .sticker-card { background:#16162a; border:1px solid var(--border); border-radius:9px; overflow:hidden; }
+            .sticker-preview { height:190px; display:flex; align-items:center; justify-content:center; background:#10101d; }
+            .sticker-preview img { width:100%; height:100%; object-fit:contain; }
+            .sticker-empty { color:var(--muted); font-size:.8rem; }
+            .sticker-info { padding:11px; font-size:.78rem; }
+            .sticker-id { color:var(--blue); font-family:monospace; word-break:break-all; }
+            .sticker-desc { color:var(--muted); margin:6px 0; line-height:1.35; max-height:42px; overflow:hidden; }
+            .sticker-meta { color:var(--muted); font-size:.7rem; margin:5px 0; }
+            .keyword-input { width:100%; background:#111120; color:var(--text); border:1px solid var(--border);
+                             border-radius:5px; padding:7px; margin:6px 0 8px; }
+            .sticker-actions { display:flex; gap:7px; justify-content:flex-end; }
             .footer { margin-top:16px; text-align:center; font-size:0.75rem; color:var(--muted); }
             .pulse { animation:pulse 2s infinite; }
             @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
@@ -536,12 +744,76 @@ public class WebDashboardListener implements RuntimeListener {
                     </div>
                 </div>
             </div>
+            <div class="panel sticker-panel">
+                <h2>表情包审阅 <span id="stickerCount" style="color:var(--muted);font-size:.75rem;"></span></h2>
+                <div class="sticker-toolbar">
+                    <input id="stickerSearch" placeholder="按 ID、关键词、描述或群号筛选">
+                    <button id="stickerRefresh">刷新</button>
+                </div>
+                <div id="stickerGrid" class="sticker-grid"><span style="color:var(--muted);">加载中...</span></div>
+            </div>
             <div class="footer">refresh: 3s | threads: <span id="threadCount">-</span></div>
             <script>
             const params = new URLSearchParams(location.search);
             const token = params.get('token');
             if (token) sessionStorage.setItem('dash_token', token);
             const auth = (u) => { const t = sessionStorage.getItem('dash_token'); return t ? u + (u.includes('?')?'&':'?') + 'token=' + t : u; };
+            const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+            const stickerDate = (v) => v ? new Date(v).toLocaleString('zh-CN') : '-';
+            async function loadStickers() {
+                const keyword = document.getElementById('stickerSearch').value.trim();
+                const url = keyword ? '/api/stickers?keyword=' + encodeURIComponent(keyword) : '/api/stickers';
+                const res = await fetch(auth(url));
+                if (!res.ok) throw new Error('sticker api ' + res.status);
+                const stickers = await res.json();
+                document.getElementById('stickerCount').textContent = '（' + stickers.length + ' 条）';
+                const grid = document.getElementById('stickerGrid');
+                if (!stickers.length) { grid.innerHTML = '<span style="color:var(--muted)">没有符合条件的表情包</span>'; return; }
+                grid.innerHTML = stickers.map(s => {
+                    const image = s.hasImage
+                        ? `<img loading="lazy" src="${esc(auth('/api/stickers/image?id=' + encodeURIComponent(s.id)))}" alt="${esc(s.id)}">`
+                        : '<span class="sticker-empty">无本地图片（内置 face 兜底）</span>';
+                    const kws = (s.keywords || []).join(', ');
+                    const auto = (s.autoKeywords || []).join('、');
+                    return `<article class="sticker-card" data-sticker-id="${esc(s.id)}">
+                        <div class="sticker-preview">${image}</div>
+                        <div class="sticker-info">
+                            <div class="sticker-id">${esc(s.id)}</div>
+                            <div class="sticker-desc" title="${esc(s.description)}">${esc(s.description) || '没有视觉描述'}</div>
+                            <div class="sticker-meta">自动识别：${esc(auto) || '-'}</div>
+                            <div class="sticker-meta">来源群：${esc(s.sourceGroup) || '-'} · ${stickerDate(s.createdAt)}</div>
+                            <label>可用关键词</label>
+                            <input class="keyword-input" value="${esc(kws)}" placeholder="例如：开心, 哈哈, 可爱">
+                            <div class="sticker-actions"><button class="save-sticker">保存关键词</button><button class="danger delete-sticker">删除</button></div>
+                        </div>
+                    </article>`;
+                }).join('');
+            }
+            async function saveSticker(card) {
+                const id = card.dataset.stickerId;
+                const keywords = card.querySelector('.keyword-input').value.split(/[,，、\\s]+/).map(s => s.trim()).filter(Boolean);
+                const res = await fetch(auth('/api/stickers/' + encodeURIComponent(id)), {
+                    method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({keywords})
+                });
+                if (!res.ok) throw new Error('save ' + res.status);
+                await loadStickers();
+            }
+            async function deleteSticker(card) {
+                const id = card.dataset.stickerId;
+                if (!confirm('确定删除这条表情包？本地图片也会一并删除。')) return;
+                const res = await fetch(auth('/api/stickers/' + encodeURIComponent(id)), {method:'DELETE'});
+                if (!res.ok) throw new Error('delete ' + res.status);
+                await loadStickers();
+            }
+            document.getElementById('stickerRefresh').addEventListener('click', () => loadStickers().catch(console.error));
+            document.getElementById('stickerSearch').addEventListener('keydown', e => { if (e.key === 'Enter') loadStickers().catch(console.error); });
+            document.getElementById('stickerGrid').addEventListener('click', e => {
+                const card = e.target.closest('.sticker-card');
+                if (!card) return;
+                const action = e.target.closest('button');
+                if (action?.classList.contains('save-sticker')) saveSticker(card).catch(console.error);
+                if (action?.classList.contains('delete-sticker')) deleteSticker(card).catch(console.error);
+            });
             async function refresh() {
                 try {
                     let [sysRes, decRes, grpRes] = await Promise.all([
@@ -598,6 +870,7 @@ public class WebDashboardListener implements RuntimeListener {
                 } catch(e) { console.error(e); }
             }
             refresh();
+            loadStickers().catch(e => { document.getElementById('stickerGrid').innerHTML = '<span style="color:var(--red)">表情包加载失败，请检查鉴权或服务状态</span>'; console.error(e); });
             setInterval(refresh, 3000);
             // 如果 API 返回 401，提示需要 token
             fetch(auth('/api/system')).then(r => { if(r.status===401) document.body.innerHTML='<div style="text-align:center;padding:60px;color:var(--muted);"><h2>需要鉴权</h2><p>请在 URL 后添加 <code>?token=你的Token</code></p></div>'; });
